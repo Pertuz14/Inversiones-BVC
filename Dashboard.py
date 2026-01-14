@@ -3,134 +3,200 @@ import pandas as pd
 import plotly.express as px
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
+from streamlit_gsheets import GSheetsConnection
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Inversiones BVC", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Inversiones BVC Pro", page_icon="🇻🇪", layout="wide")
 
-# --- FUNCIONES DE AUTOMATIZACIÓN (SCRAPING) ---
+# Estilos CSS para limpiar la interfaz
+st.markdown("""
+<style>
+    .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px;}
+    div[data-testid="stMetricValue"] {font-size: 28px;}
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_data(ttl=3600) # Guarda el dato por 1 hora para no saturar
+# --- CONEXIÓN A GOOGLE SHEETS ---
+# Buscamos una hoja llamada "Portafolio" y otra "Precios"
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+def cargar_datos():
+    """Carga los datos desde Google Sheets. Si falla, usa datos vacíos."""
+    try:
+        df_port = conn.read(worksheet="Portafolio", ttl=0) # ttl=0 para no usar caché vieja
+        # Asegurar formato de fecha
+        df_port["Fecha Compra"] = pd.to_datetime(df_port["Fecha Compra"])
+        return df_port
+    except:
+        # Si es la primera vez o hay error, creamos estructura vacía
+        return pd.DataFrame(columns=["Ticker", "Cantidad", "Costo Promedio (Bs)", "Fecha Compra"])
+
+def guardar_compra(ticker, cantidad, costo, fecha):
+    """Añade una fila nueva a la hoja de Google Sheets."""
+    df_actual = cargar_datos()
+    nuevo_registro = pd.DataFrame([{
+        "Ticker": ticker,
+        "Cantidad": cantidad,
+        "Costo Promedio (Bs)": costo,
+        "Fecha Compra": pd.to_datetime(fecha)
+    }])
+    df_actualizado = pd.concat([df_actual, nuevo_registro], ignore_index=True)
+    # Escribimos de vuelta en la hoja "Portafolio"
+    conn.update(worksheet="Portafolio", data=df_actualizado)
+    st.cache_data.clear() # Limpiamos caché para ver cambios inmediato
+
+# --- AUTOMATIZACIÓN (BCV & SCRAPING) ---
+@st.cache_data(ttl=3600)
 def obtener_tasa_bcv():
-    """Intenta obtener la tasa del Dólar oficial del BCV."""
     url = "https://www.bcv.org.ve/"
     try:
-        # El BCV a veces tiene problemas de certificado SSL, lo ignoramos con verify=False
         response = requests.get(url, verify=False, timeout=5)
         soup = BeautifulSoup(response.content, "html.parser")
-        
-        # Buscamos el div específico donde el BCV publica el dolar
         dolar_div = soup.find("div", {"id": "dolar"})
-        tasa_texto = dolar_div.find("strong").text.strip().replace(',', '.')
-        return float(tasa_texto)
-    except Exception as e:
-        return 0.0 # Si falla, devolveremos 0 para pedir manual
+        return float(dolar_div.find("strong").text.strip().replace(',', '.'))
+    except:
+        return 0.0
 
-# --- GESTIÓN DE ESTADO ---
-if 'portafolio' not in st.session_state:
-    st.session_state.portafolio = pd.DataFrame(columns=["Ticker", "Cantidad", "Costo Promedio (Bs)", "Fecha Compra"])
+# --- INTERFAZ: ENCABEZADO Y TASA ---
+st.title("🇻🇪 Mi Portafolio de Inversiones")
+st.markdown("---")
 
-# Acciones predefinidas para monitorear
+# Tasa BCV
+tasa_bcv = obtener_tasa_bcv()
+col_tasa, col_espacio = st.columns([1, 4])
+with col_tasa:
+    if tasa_bcv > 0:
+        st.metric("Tasa BCV Oficial", f"Bs. {tasa_bcv}", delta="En tiempo real", delta_color="normal")
+    else:
+        tasa_bcv = st.number_input("⚠️ BCV Caído. Ingresa Tasa Manual:", value=60.0)
+
+# --- CARGAR DATOS ---
+df_portafolio = cargar_datos()
+
+# Lista de acciones base
 acciones_base = ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL', 'CANTV', 'FVI.B']
 
-if 'precios_mercado' not in st.session_state:
-    st.session_state.precios_mercado = pd.DataFrame({
-        "Ticker": acciones_base,
-        "Precio Bs.": [0.0] * len(acciones_base)
-    })
-
-# --- INTERFAZ ---
-st.title("🇻🇪 Monitor BVC & Dólar BCV")
-
-# 1. BARRA SUPERIOR: TASA BCV
-tasa_bcv_auto = obtener_tasa_bcv()
-
-col_tasa1, col_tasa2 = st.columns([1, 3])
-with col_tasa1:
-    st.markdown("### 🏦 Tasa BCV")
-    if tasa_bcv_auto > 0:
-        st.success(f"Detectada: {tasa_bcv_auto} Bs./$")
-        tasa_uso = tasa_bcv_auto
-    else:
-        st.warning("No se pudo leer el BCV (Página caída/lenta)")
-        tasa_uso = st.number_input("Ingresa Tasa Manual:", value=60.0, min_value=1.0)
-
-# 2. BARRA LATERAL: COMPRAS
+# --- BARRA LATERAL (REGISTRO) ---
 with st.sidebar:
-    st.header("📝 Registrar Compra")
-    ticker_input = st.selectbox("Acción", acciones_base)
-    cantidad_input = st.number_input("Cantidad", min_value=1, value=100)
-    costo_input = st.number_input("Costo Unitario (Bs.)", min_value=0.01, format="%.2f")
-    fecha_input = st.date_input("Fecha", datetime.now())
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Python.svg/1200px-Python.svg.png", width=50)
+    st.header("📝 Registrar Operación")
     
-    if st.button("Guardar"):
-        nuevo = pd.DataFrame([{
-            "Ticker": ticker_input, 
-            "Cantidad": cantidad_input, 
-            "Costo Promedio (Bs)": costo_input,
-            "Fecha Compra": pd.to_datetime(fecha_input)
-        }])
-        st.session_state.portafolio = pd.concat([st.session_state.portafolio, nuevo], ignore_index=True)
-        st.success("Guardado.")
+    with st.form("form_compra"):
+        ticker_in = st.selectbox("Acción", acciones_base)
+        cant_in = st.number_input("Cantidad", min_value=1, value=100)
+        costo_in = st.number_input("Precio Compra (Bs)", min_value=0.01, format="%.2f")
+        fecha_in = st.date_input("Fecha", datetime.now())
+        
+        submitted = st.form_submit_button("💾 Guardar en la Nube")
+        if submitted:
+            guardar_compra(ticker_in, cant_in, costo_in, fecha_in)
+            st.success("¡Guardado en Google Sheets!")
+            st.rerun()
 
-# 3. PRECIOS ACTUALES (Automático o Manual)
-st.subheader("📈 Precios del Mercado (Bs.)")
-st.info("💡 Si la automatización falla, haz doble click en la celda para corregir el precio.")
+# --- CUERPO PRINCIPAL ---
 
-# Editor de precios
-df_precios = st.data_editor(
-    st.session_state.precios_mercado,
-    key="editor_precios",
-    column_config={
-        "Precio Bs.": st.column_config.NumberColumn(format="%.2f Bs")
-    },
-    hide_index=True
-)
-st.session_state.precios_mercado = df_precios
+# 1. PRECIOS ACTUALES (Manual/Visual)
+if 'precios_mercado' not in st.session_state:
+    st.session_state.precios_mercado = pd.DataFrame({"Ticker": acciones_base, "Precio Bs.": [0.0]*len(acciones_base)})
 
-# 4. CÁLCULOS Y DASHBOARD
-df_port = st.session_state.portafolio
+st.subheader("📊 Precios de Hoy")
+with st.expander("📝 Click aquí para actualizar precios del mercado", expanded=True):
+    df_precios = st.data_editor(
+        st.session_state.precios_mercado,
+        column_config={"Precio Bs.": st.column_config.NumberColumn(format="%.2f Bs")},
+        hide_index=True,
+        use_container_width=True
+    )
+    st.session_state.precios_mercado = df_precios
 
-if not df_port.empty and tasa_uso > 0:
-    # Unir datos
-    df_final = df_port.merge(df_precios, on="Ticker", how="left")
+# 2. CÁLCULOS Y VISUALIZACIÓN
+if not df_portafolio.empty:
+    # Cruce de datos
+    df_final = df_portafolio.merge(df_precios, on="Ticker", how="left")
     
-    # Cálculos en Bolívares
-    df_final["Valor Costo (Bs)"] = df_final["Cantidad"] * df_final["Costo Promedio (Bs)"]
-    df_final["Valor Mercado (Bs)"] = df_final["Cantidad"] * df_final["Precio Bs."]
-    df_final["Ganancia (Bs)"] = df_final["Valor Mercado (Bs)"] - df_final["Valor Costo (Bs)"]
+    # Matemáticas
+    df_final["Inv. Total (Bs)"] = df_final["Cantidad"] * df_final["Costo Promedio (Bs)"]
+    df_final["Valor Hoy (Bs)"] = df_final["Cantidad"] * df_final["Precio Bs."]
+    df_final["Ganancia (Bs)"] = df_final["Valor Hoy (Bs)"] - df_final["Inv. Total (Bs)"]
     
-    # Cálculos en Dólares (BCV)
-    df_final["Valor Mercado ($)"] = df_final["Valor Mercado (Bs)"] / tasa_uso
-    df_final["Ganancia ($)"] = df_final["Ganancia (Bs)"] / tasa_uso
+    # Conversión a Dólares
+    df_final["Valor Hoy ($)"] = df_final["Valor Hoy (Bs)"] / tasa_bcv
+    df_final["Ganancia ($)"] = df_final["Ganancia (Bs)"] / tasa_bcv
+    df_final["Rentabilidad %"] = (df_final["Ganancia (Bs)"] / df_final["Inv. Total (Bs)"]) * 100
+
+    # --- TARJETAS DE RESUMEN (KPIs) ---
+    st.markdown("### 💰 Estado de Cuenta")
+    k1, k2, k3, k4 = st.columns(4)
     
-    # --- MÉTRICAS ---
-    st.markdown("---")
-    total_bs = df_final["Valor Mercado (Bs)"].sum()
-    total_usd = df_final["Valor Mercado ($)"].sum()
+    total_usd = df_final["Valor Hoy ($)"].sum()
     ganancia_usd = df_final["Ganancia ($)"].sum()
+    rentabilidad_total = (df_final["Ganancia (Bs)"].sum() / df_final["Inv. Total (Bs)"].sum()) * 100
     
-    kpi1, kpi2, kpi3 = st.columns(3)
-    kpi1.metric("Valor Total Cartera (Bs)", f"Bs. {total_bs:,.2f}")
-    kpi2.metric("Valor Total Cartera ($)", f"$ {total_usd:,.2f}", help=f"Calculado a tasa BCV: {tasa_uso}")
-    kpi3.metric("Ganancia/Pérdida ($)", f"$ {ganancia_usd:,.2f}", delta_color="normal")
+    k1.metric("Valor Cartera ($)", f"${total_usd:,.2f}")
+    k2.metric("Ganancia Neta ($)", f"${ganancia_usd:,.2f}", delta_color="normal")
+    k3.metric("Rentabilidad Total", f"{rentabilidad_total:.2f}%", delta="Global")
+    k4.metric("Total Invertido (Bs)", f"Bs.{df_final['Inv. Total (Bs)'].sum():,.2f}")
+
+    # --- GRÁFICOS BONITOS ---
+    tab1, tab2 = st.tabs(["📈 Distribución & Valor", "📋 Detalle Tabla"])
     
-    # --- GRÁFICOS ---
-    g1, g2 = st.columns(2)
-    with g1:
-        # Gráfico en Dólares
-        fig = px.bar(df_final, x='Ticker', y='Valor Mercado ($)', title='Valor de Posiciones en USD ($)')
-        st.plotly_chart(fig, use_container_width=True)
-    with g2:
-        # Tabla resumen
-        st.subheader("Detalle Financiero")
-        vista_simple = df_final[["Ticker", "Cantidad", "Precio Bs.", "Valor Mercado ($)", "Ganancia ($)"]]
-        st.dataframe(vista_simple.style.format({
+    with tab1:
+        c1, c2 = st.columns(2)
+        with c1:
+            # Gráfico Donut limpio
+            fig_pie = px.pie(df_final, values='Valor Hoy ($)', names='Ticker', hole=0.4, title="¿Dónde está mi dinero?")
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with c2:
+            # Gráfico Barras coloreadas por ganancia
+            fig_bar = px.bar(df_final, x='Ticker', y='Ganancia ($)', color='Ganancia ($)', 
+                             title="Ganancia/Pérdida por Acción ($)", color_continuous_scale="RdBu")
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+    with tab2:
+        st.dataframe(df_final.style.format({
+            "Costo Promedio (Bs)": "{:.2f}",
             "Precio Bs.": "{:.2f}",
-            "Valor Mercado ($)": "${:.2f}",
-            "Ganancia ($)": "${:.2f}"
-        }), hide_index=True)
+            "Valor Hoy ($)": "${:.2f}",
+            "Ganancia ($)": "${:.2f}",
+            "Rentabilidad %": "{:.2f}%"
+        }), use_container_width=True)
+
+    # --- SECCIÓN DE REPORTES (¡RESTORED!) ---
+    st.markdown("---")
+    st.subheader("📅 Reportes Históricos")
+    
+    filtro_col, _ = st.columns([1, 3])
+    with filtro_col:
+        periodo = st.selectbox("Filtrar compras realizadas:", ["Todo el Historial", "Última Semana", "Último Mes", "Último Año"])
+    
+    hoy = datetime.now()
+    if periodo == "Última Semana":
+        fecha_corte = hoy - timedelta(days=7)
+    elif periodo == "Último Mes":
+        fecha_corte = hoy - timedelta(days=30)
+    elif periodo == "Último Año":
+        fecha_corte = hoy - timedelta(days=365)
+    else:
+        fecha_corte = datetime(2000, 1, 1) # Todo
+        
+    df_reporte = df_final[df_final["Fecha Compra"] >= pd.to_datetime(fecha_corte)]
+    
+    if not df_reporte.empty:
+        inv_periodo = df_reporte["Inv. Total (Bs)"].sum() / tasa_bcv
+        val_periodo = df_reporte["Valor Hoy ($)"].sum()
+        st.info(f"Mostrando rendimiento de las acciones compradas en: **{periodo}**")
+        
+        # Mini resumen del reporte
+        r1, r2 = st.columns(2)
+        r1.metric("Invertido en este periodo ($)", f"${inv_periodo:,.2f}")
+        r2.metric("Valor actual de esas compras", f"${val_periodo:,.2f}", delta=f"{val_periodo-inv_periodo:,.2f} $")
+        
+        st.dataframe(df_reporte[["Ticker", "Fecha Compra", "Cantidad", "Ganancia ($)", "Rentabilidad %"]])
+    else:
+        st.warning(f"No hiciste compras en {periodo}.")
 
 else:
-    st.write("👈 Registra tu primera compra para ver los cálculos.")
+    st.info("👈 ¡Tu portafolio está vacío! Registra tu primera compra en la barra lateral para empezar.")
 
