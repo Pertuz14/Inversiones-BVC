@@ -9,7 +9,7 @@ from streamlit_gsheets import GSheetsConnection
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Inversiones BVC Pro", page_icon="🇻🇪", layout="wide")
 
-# Estilos CSS para limpiar la interfaz
+# Estilos CSS
 st.markdown("""
 <style>
     .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px;}
@@ -18,35 +18,46 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
-# Buscamos una hoja llamada "Portafolio" y otra "Precios"
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def cargar_datos():
-    """Carga los datos desde Google Sheets. Si falla, usa datos vacíos."""
+    """Carga los datos desde Google Sheets."""
     try:
-        df_port = conn.read(worksheet="Portafolio", ttl=0) # ttl=0 para no usar caché vieja
-        # Asegurar formato de fecha
+        df_port = conn.read(worksheet="Portafolio", ttl=0)
         df_port["Fecha Compra"] = pd.to_datetime(df_port["Fecha Compra"])
         return df_port
     except:
-        # Si es la primera vez o hay error, creamos estructura vacía
-        return pd.DataFrame(columns=["Ticker", "Cantidad", "Costo Promedio (Bs)", "Fecha Compra"])
+        # Estructura base si está vacío
+        return pd.DataFrame(columns=[
+            "Ticker", "Cantidad", "Precio Compra (Bs)", 
+            "Fecha Compra", "Tasa Cambio (Bs/$)", 
+            "Total Invertido (Bs)", "Total Invertido ($)"
+        ])
 
-def guardar_compra(ticker, cantidad, costo, fecha):
-    """Añade una fila nueva a la hoja de Google Sheets."""
+def guardar_compra(ticker, cantidad, costo, fecha, tasa_registro):
+    """Calcula los totales y guarda la fila en formato tabla en Sheets."""
     df_actual = cargar_datos()
+    
+    # Cálculos para el registro histórico
+    total_bs = cantidad * costo
+    total_usd = total_bs / tasa_registro if tasa_registro > 0 else 0
+    
     nuevo_registro = pd.DataFrame([{
         "Ticker": ticker,
         "Cantidad": cantidad,
-        "Costo Promedio (Bs)": costo,
-        "Fecha Compra": pd.to_datetime(fecha)
+        "Precio Compra (Bs)": costo,
+        "Fecha Compra": pd.to_datetime(fecha),
+        "Tasa Cambio (Bs/$)": tasa_registro,      # <--- Tasa del día guardada
+        "Total Invertido (Bs)": total_bs,         # <--- Total en Bolívares guardado
+        "Total Invertido ($)": total_usd          # <--- Equivalente en Dólares guardado
     }])
+    
+    # Unimos y sobrescribimos la hoja para mantener el formato de tabla limpia
     df_actualizado = pd.concat([df_actual, nuevo_registro], ignore_index=True)
-    # Escribimos de vuelta en la hoja "Portafolio"
     conn.update(worksheet="Portafolio", data=df_actualizado)
-    st.cache_data.clear() # Limpiamos caché para ver cambios inmediato
+    st.cache_data.clear()
 
-# --- AUTOMATIZACIÓN (BCV & SCRAPING) ---
+# --- AUTOMATIZACIÓN (BCV) ---
 @st.cache_data(ttl=3600)
 def obtener_tasa_bcv():
     url = "https://www.bcv.org.ve/"
@@ -58,45 +69,48 @@ def obtener_tasa_bcv():
     except:
         return 0.0
 
-# --- INTERFAZ: ENCABEZADO Y TASA ---
+# --- INTERFAZ ---
 st.title("🇻🇪 Mi Portafolio de Inversiones")
 st.markdown("---")
 
-# Tasa BCV
+# Obtener Tasa (para usarla en el guardado)
 tasa_bcv = obtener_tasa_bcv()
+tasa_uso = 0.0
+
+# Mostrar Tasa y definir cuál usar
 col_tasa, col_espacio = st.columns([1, 4])
 with col_tasa:
     if tasa_bcv > 0:
         st.metric("Tasa BCV Oficial", f"Bs. {tasa_bcv}", delta="En tiempo real", delta_color="normal")
+        tasa_uso = tasa_bcv
     else:
-        tasa_bcv = st.number_input("⚠️ BCV Caído. Ingresa Tasa Manual:", value=60.0)
+        tasa_uso = st.number_input("⚠️ BCV Caído. Ingresa Tasa Manual:", value=60.0)
 
-# --- CARGAR DATOS ---
+# Cargar Portafolio
 df_portafolio = cargar_datos()
-
-# Lista de acciones base
 acciones_base = ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL', 'CANTV', 'FVI.B']
 
-# --- BARRA LATERAL (REGISTRO) ---
+# --- BARRA LATERAL (REGISTRO ACTUALIZADO) ---
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Python.svg/1200px-Python.svg.png", width=50)
     st.header("📝 Registrar Operación")
     
     with st.form("form_compra"):
+        st.info(f"Tasa a registrar: Bs. {tasa_uso}") # Feedback visual
+        
         ticker_in = st.selectbox("Acción", acciones_base)
         cant_in = st.number_input("Cantidad", min_value=1, value=100)
         costo_in = st.number_input("Precio Compra (Bs)", min_value=0.01, format="%.2f")
         fecha_in = st.date_input("Fecha", datetime.now())
         
-        submitted = st.form_submit_button("💾 Guardar en la Nube")
+        submitted = st.form_submit_button("💾 Guardar Transacción")
         if submitted:
-            guardar_compra(ticker_in, cant_in, costo_in, fecha_in)
-            st.success("¡Guardado en Google Sheets!")
+            # Enviamos la tasa_uso a la función de guardado
+            guardar_compra(ticker_in, cant_in, costo_in, fecha_in, tasa_uso)
+            st.success("¡Transacción registrada exitosamente!")
             st.rerun()
 
 # --- CUERPO PRINCIPAL ---
-
-# 1. PRECIOS ACTUALES (Manual/Visual)
 if 'precios_mercado' not in st.session_state:
     st.session_state.precios_mercado = pd.DataFrame({"Ticker": acciones_base, "Precio Bs.": [0.0]*len(acciones_base)})
 
@@ -110,92 +124,88 @@ with st.expander("📝 Click aquí para actualizar precios del mercado", expande
     )
     st.session_state.precios_mercado = df_precios
 
-# 2. CÁLCULOS Y VISUALIZACIÓN
+# CÁLCULOS
 if not df_portafolio.empty:
-    # Cruce de datos
+    # Usamos "Precio Compra (Bs)" para los cálculos históricos
     df_final = df_portafolio.merge(df_precios, on="Ticker", how="left")
     
     # Matemáticas
-    df_final["Inv. Total (Bs)"] = df_final["Cantidad"] * df_final["Costo Promedio (Bs)"]
+    df_final["Inv. Total (Bs)"] = df_final["Total Invertido (Bs)"] # Usamos el dato guardado
     df_final["Valor Hoy (Bs)"] = df_final["Cantidad"] * df_final["Precio Bs."]
     df_final["Ganancia (Bs)"] = df_final["Valor Hoy (Bs)"] - df_final["Inv. Total (Bs)"]
     
-    # Conversión a Dólares
-    df_final["Valor Hoy ($)"] = df_final["Valor Hoy (Bs)"] / tasa_bcv
-    df_final["Ganancia ($)"] = df_final["Ganancia (Bs)"] / tasa_bcv
-    df_final["Rentabilidad %"] = (df_final["Ganancia (Bs)"] / df_final["Inv. Total (Bs)"]) * 100
+    # Conversión a Dólares (Valor actual vs Inversión histórica en $)
+    df_final["Valor Hoy ($)"] = df_final["Valor Hoy (Bs)"] / tasa_uso
+    df_final["Inv. Total ($)"] = df_final["Total Invertido ($)"] # Dato histórico
+    df_final["Ganancia ($)"] = df_final["Valor Hoy ($)"] - df_final["Inv. Total ($)"]
+    
+    # Evitar división por cero
+    df_final["Rentabilidad %"] = df_final.apply(
+        lambda x: (x["Ganancia ($)"] / x["Inv. Total ($)"] * 100) if x["Inv. Total ($)"] > 0 else 0, axis=1
+    )
 
-    # --- TARJETAS DE RESUMEN (KPIs) ---
+    # --- KPIs ---
     st.markdown("### 💰 Estado de Cuenta")
     k1, k2, k3, k4 = st.columns(4)
     
     total_usd = df_final["Valor Hoy ($)"].sum()
     ganancia_usd = df_final["Ganancia ($)"].sum()
-    rentabilidad_total = (df_final["Ganancia (Bs)"].sum() / df_final["Inv. Total (Bs)"].sum()) * 100
+    inv_total_usd = df_final["Inv. Total ($)"].sum()
+    rentabilidad_total = ((total_usd - inv_total_usd) / inv_total_usd * 100) if inv_total_usd > 0 else 0
     
     k1.metric("Valor Cartera ($)", f"${total_usd:,.2f}")
     k2.metric("Ganancia Neta ($)", f"${ganancia_usd:,.2f}", delta_color="normal")
     k3.metric("Rentabilidad Total", f"{rentabilidad_total:.2f}%", delta="Global")
-    k4.metric("Total Invertido (Bs)", f"Bs.{df_final['Inv. Total (Bs)'].sum():,.2f}")
+    k4.metric("Total Invertido ($)", f"${inv_total_usd:,.2f}")
 
-    # --- GRÁFICOS BONITOS ---
+    # --- GRÁFICOS Y TABLA ---
     tab1, tab2 = st.tabs(["📈 Distribución & Valor", "📋 Detalle Tabla"])
     
     with tab1:
         c1, c2 = st.columns(2)
         with c1:
-            # Gráfico Donut limpio
             fig_pie = px.pie(df_final, values='Valor Hoy ($)', names='Ticker', hole=0.4, title="¿Dónde está mi dinero?")
-            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
             st.plotly_chart(fig_pie, use_container_width=True)
         with c2:
-            # Gráfico Barras coloreadas por ganancia
             fig_bar = px.bar(df_final, x='Ticker', y='Ganancia ($)', color='Ganancia ($)', 
                              title="Ganancia/Pérdida por Acción ($)", color_continuous_scale="RdBu")
             st.plotly_chart(fig_bar, use_container_width=True)
 
     with tab2:
-        st.dataframe(df_final.style.format({
-            "Costo Promedio (Bs)": "{:.2f}",
-            "Precio Bs.": "{:.2f}",
+        # Mostramos la tabla completa con los nuevos datos históricos
+        st.dataframe(df_final[[
+            "Ticker", "Cantidad", "Fecha Compra", 
+            "Precio Compra (Bs)", "Tasa Cambio (Bs/$)", 
+            "Total Invertido (Bs)", "Total Invertido ($)", 
+            "Valor Hoy ($)", "Ganancia ($)", "Rentabilidad %"
+        ]].style.format({
+            "Precio Compra (Bs)": "{:.2f}",
+            "Tasa Cambio (Bs/$)": "{:.2f}",
+            "Total Invertido (Bs)": "{:.2f}",
+            "Total Invertido ($)": "${:.2f}",
             "Valor Hoy ($)": "${:.2f}",
             "Ganancia ($)": "${:.2f}",
             "Rentabilidad %": "{:.2f}%"
         }), use_container_width=True)
 
-    # --- SECCIÓN DE REPORTES (¡RESTORED!) ---
+    # --- REPORTES ---
     st.markdown("---")
     st.subheader("📅 Reportes Históricos")
-    
-    filtro_col, _ = st.columns([1, 3])
-    with filtro_col:
-        periodo = st.selectbox("Filtrar compras realizadas:", ["Todo el Historial", "Última Semana", "Último Mes", "Último Año"])
+    periodo = st.selectbox("Filtrar por:", ["Todo el Historial", "Última Semana", "Último Mes", "Último Año"])
     
     hoy = datetime.now()
-    if periodo == "Última Semana":
-        fecha_corte = hoy - timedelta(days=7)
-    elif periodo == "Último Mes":
-        fecha_corte = hoy - timedelta(days=30)
-    elif periodo == "Último Año":
-        fecha_corte = hoy - timedelta(days=365)
-    else:
-        fecha_corte = datetime(2000, 1, 1) # Todo
+    if periodo == "Última Semana": fecha_corte = hoy - timedelta(days=7)
+    elif periodo == "Último Mes": fecha_corte = hoy - timedelta(days=30)
+    elif periodo == "Último Año": fecha_corte = hoy - timedelta(days=365)
+    else: fecha_corte = datetime(2000, 1, 1)
         
     df_reporte = df_final[df_final["Fecha Compra"] >= pd.to_datetime(fecha_corte)]
     
     if not df_reporte.empty:
-        inv_periodo = df_reporte["Inv. Total (Bs)"].sum() / tasa_bcv
-        val_periodo = df_reporte["Valor Hoy ($)"].sum()
-        st.info(f"Mostrando rendimiento de las acciones compradas en: **{periodo}**")
-        
-        # Mini resumen del reporte
-        r1, r2 = st.columns(2)
-        r1.metric("Invertido en este periodo ($)", f"${inv_periodo:,.2f}")
-        r2.metric("Valor actual de esas compras", f"${val_periodo:,.2f}", delta=f"{val_periodo-inv_periodo:,.2f} $")
-        
-        st.dataframe(df_reporte[["Ticker", "Fecha Compra", "Cantidad", "Ganancia ($)", "Rentabilidad %"]])
+        st.info(f"Mostrando: {periodo}")
+        st.dataframe(df_reporte)
     else:
-        st.warning(f"No hiciste compras en {periodo}.")
+        st.warning(f"No hay datos para {periodo}.")
 
 else:
-    st.info("👈 ¡Tu portafolio está vacío! Registra tu primera compra en la barra lateral para empezar.")
+    st.info("👈 Registra tu primera compra para empezar.")
