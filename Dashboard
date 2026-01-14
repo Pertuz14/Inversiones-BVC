@@ -1,0 +1,132 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from datetime import datetime, timedelta
+import random
+
+# --- CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(page_title="Dashboard Inversiones BVC", layout="wide")
+
+# --- 1. SIMULACIÓN DE DATOS DE LA BVC (WEB SCRAPING) ---
+# En un entorno real, aquí usaríamos 'BeautifulSoup' para leer bolsadecaracas.com
+def obtener_precios_actuales():
+    # Lista de acciones comunes en BVC
+    tickers = ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL']
+    
+    # Simulamos fluctuación de precios para el ejemplo
+    data = []
+    for ticker in tickers:
+        precio_base = random.uniform(10, 100) # Precio simulado en VES
+        cambio = random.uniform(-0.05, 0.05)
+        data.append({
+            "Ticker": ticker,
+            "Precio Actual": round(precio_base, 2),
+            "Cambio Diario %": round(cambio * 100, 2)
+        })
+    return pd.DataFrame(data)
+
+# --- 2. GESTIÓN DEL PORTAFOLIO (BASE DE DATOS LOCAL) ---
+# En un caso real, esto vendría de un Excel o Google Sheets conectado
+if 'portafolio' not in st.session_state:
+    st.session_state.portafolio = pd.DataFrame(columns=["Ticker", "Cantidad", "Costo Promedio", "Fecha Compra"])
+
+def agregar_transaccion(ticker, cantidad, costo, fecha):
+    nuevo_registro = pd.DataFrame([{
+        "Ticker": ticker, 
+        "Cantidad": cantidad, 
+        "Costo Promedio": costo,
+        "Fecha Compra": fecha
+    }])
+    st.session_state.portafolio = pd.concat([st.session_state.portafolio, nuevo_registro], ignore_index=True)
+
+# --- 3. INTERFAZ VISUAL ---
+st.title("🇻🇪 Dashboard de Inversiones - Bolsa de Valores de Caracas")
+
+# Sidebar: Ingreso de Operaciones
+with st.sidebar:
+    st.header("📝 Registrar Compra")
+    ticker_input = st.selectbox("Acción", ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL'])
+    cantidad_input = st.number_input("Cantidad de Acciones", min_value=1, value=100)
+    costo_input = st.number_input("Costo por Acción (VES)", min_value=0.01, value=10.0)
+    fecha_input = st.date_input("Fecha", datetime.now())
+    
+    if st.button("Agregar al Portafolio"):
+        agregar_transaccion(ticker_input, cantidad_input, costo_input, fecha_input)
+        st.success(f"Compra de {ticker_input} registrada.")
+
+# --- 4. CÁLCULOS Y LÓGICA ---
+precios_mercado = obtener_precios_actuales()
+df_portafolio = st.session_state.portafolio
+
+if not df_portafolio.empty:
+    # Unir datos del portafolio con precios actuales
+    df_merged = df_portafolio.merge(precios_mercado, on="Ticker", how="left")
+    
+    # Cálculos financieros
+    df_merged["Valor Costo Total"] = df_merged["Cantidad"] * df_merged["Costo Promedio"]
+    df_merged["Valor Mercado Total"] = df_merged["Cantidad"] * df_merged["Precio Actual"]
+    df_merged["Ganancia/Pérdida"] = df_merged["Valor Mercado Total"] - df_merged["Valor Costo Total"]
+    df_merged["Rendimiento %"] = (df_merged["Ganancia/Pérdida"] / df_merged["Valor Costo Total"]) * 100
+
+    # Métricas Generales
+    total_invertido = df_merged["Valor Costo Total"].sum()
+    valor_actual = df_merged["Valor Mercado Total"].sum()
+    pnl_total = valor_actual - total_invertido
+    
+    # --- 5. REPORTES VISUALES ---
+    
+    # KPIs Superiores
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Valor Total del Portafolio", f"VES {valor_actual:,.2f}", f"{pnl_total:,.2f} VES")
+    col2.metric("Total Invertido", f"VES {total_invertido:,.2f}")
+    col3.metric("Rendimiento Total", f"{((valor_actual/total_invertido)-1)*100:.2f}%")
+
+    st.markdown("---")
+
+    # Gráficos
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.subheader("📊 Distribución del Portafolio")
+        fig_pie = px.pie(df_merged, values='Valor Mercado Total', names='Ticker', hole=0.4)
+        st.plotly_chart(fig_pie, use_container_width=True)
+        
+    with c2:
+        st.subheader("📈 Rendimiento por Acción")
+        fig_bar = px.bar(df_merged, x='Ticker', y='Ganancia/Pérdida', color='Ganancia/Pérdida', 
+                         color_continuous_scale=['red', 'green'])
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    # Tabla Detallada
+    st.subheader("📋 Detalle de Posiciones")
+    st.dataframe(df_merged.style.format({
+        "Precio Actual": "{:.2f}",
+        "Valor Mercado Total": "{:.2f}",
+        "Rendimiento %": "{:.2f}%"
+    }))
+
+    # --- 6. SECCIÓN DE REPORTES (Semanal/Mensual) ---
+    st.markdown("---")
+    st.subheader("📅 Reportes de Rendimiento")
+    
+    filtro_reporte = st.radio("Ver reporte:", ["Semanal", "Mensual", "Anual"], horizontal=True)
+    
+    # Lógica simple de filtro de fechas para el reporte
+    hoy = pd.to_datetime(datetime.now())
+    if filtro_reporte == "Semanal":
+        fecha_inicio = hoy - timedelta(days=7)
+    elif filtro_reporte == "Mensual":
+        fecha_inicio = hoy - timedelta(days=30)
+    else:
+        fecha_inicio = hoy - timedelta(days=365)
+        
+    df_filtrado = df_portafolio[pd.to_datetime(df_portafolio["Fecha Compra"]) >= fecha_inicio]
+    
+    if not df_filtrado.empty:
+        st.info(f"Mostrando compras realizadas en el periodo: {filtro_reporte}")
+        st.table(df_filtrado)
+    else:
+        st.warning(f"No hay movimientos registrados en el periodo {filtro_reporte}.")
+
+else:
+    st.info("👈 Registra tu primera inversión en el menú de la izquierda para ver el dashboard.")
