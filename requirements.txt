@@ -4,4 +4,4 @@ plotly
 requests
 beautifulsoup4
 lxml
-
+st-gsheets-connection
