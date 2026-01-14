@@ -174,20 +174,38 @@ if not df_portafolio.empty:
         lambda x: (x["Ganancia ($)"] / x["Inv. Total ($)"] * 100) if x["Inv. Total ($)"] != 0 else 0, axis=1
     )
 
-    # --- KPIs ---
+   # --- KPIs (MODIFICADO: DUAL CURRENCY) ---
     st.markdown("### 💰 Estado de Cuenta")
-    k1, k2, k3, k4 = st.columns(4)
     
+    # 1. Calculamos los totales en ambas monedas
+    total_bs = df_final["Valor Hoy (Bs)"].sum()
     total_usd = df_final["Valor Hoy ($)"].sum()
-    ganancia_usd = df_final["Ganancia ($)"].sum()
-    inv_total_usd = df_final["Inv. Total ($)"].sum()
-    rentabilidad_total = ((total_usd - inv_total_usd) / inv_total_usd * 100) if inv_total_usd != 0 else 0
     
+    inv_total_bs = df_final["Inv. Total (Bs)"].sum()
+    inv_total_usd = df_final["Inv. Total ($)"].sum()
+    
+    ganancia_bs = df_final["Ganancia (Bs)"].sum()
+    ganancia_usd = df_final["Ganancia ($)"].sum()
+    
+    # Rentabilidad (se calcula en base a dólares que es la moneda fuerte de referencia)
+    rent_total = ((total_usd - inv_total_usd) / inv_total_usd * 100) if inv_total_usd != 0 else 0
+    
+    # 2. Fila Principal: DÓLARES ($)
+    st.markdown("##### 💵 Referencia en Divisas")
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Valor Cartera ($)", f"${total_usd:,.2f}")
     k2.metric("Ganancia Neta ($)", f"${ganancia_usd:,.2f}", delta_color="normal")
-    k3.metric("Rentabilidad Total", f"{rentabilidad_total:.2f}%", delta="Global")
-    k4.metric("Total Invertido ($)", f"${inv_total_usd:,.2f}")
+    k3.metric("Total Invertido ($)", f"${inv_total_usd:,.2f}")
+    k4.metric("Rentabilidad Global", f"{rent_total:.2f}%")
 
+    # 3. Fila Secundaria: BOLÍVARES (Bs)
+    st.markdown("##### 🇻🇪 Referencia en Bolívares")
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Valor Cartera (Bs)", f"Bs. {total_bs:,.2f}")
+    b2.metric("Ganancia Neta (Bs)", f"Bs. {ganancia_bs:,.2f}", delta_color="normal")
+    b3.metric("Total Invertido (Bs)", f"Bs. {inv_total_bs:,.2f}")
+    b4.empty() # Espacio vacío para alinear
+    
     # --- GRÁFICOS ---
     tab1, tab2 = st.tabs(["📈 Distribución & Valor", "📋 Detalle Tabla"])
     
