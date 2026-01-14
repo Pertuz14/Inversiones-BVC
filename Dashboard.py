@@ -199,4 +199,3 @@ if not df_portafolio.empty:
 
 else:
     st.info("👈 ¡Tu portafolio está vacío! Registra tu primera compra en la barra lateral para empezar.")
-
