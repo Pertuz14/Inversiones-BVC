@@ -73,52 +73,52 @@ def obtener_tasa_bcv():
     except:
         return 0.0
 
-# --- NUEVA FUNCIÓN: SCRAPER BOLSA DE CARACAS ---
-def intentar_actualizar_precios_bvc():
-    """Intenta leer la web de la BVC simulando ser un humano."""
-    url = "https://www.bolsadecaracas.com/esp/index.jsp"
-    
-    # Cabeceras para simular un navegador real (Chrome)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9"
-    }
-    
-    precios_detectados = {}
+# --- NUEVA FUNCIÓN: LEER PRECIOS DESDE GOOGLE SHEETS (CON DIAGNÓSTICO) ---
+def cargar_precios_web_debug():
+    """Lee la hoja Precios_Web intentando adivinar la estructura."""
     try:
-        # verify=False ayuda si el certificado SSL de la bolsa está vencido
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        # Leemos la hoja completa
+        df_web = conn.read(worksheet="Precios_Web", ttl=0)
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, "html.parser")
-            filas = soup.find_all("tr")
+        if df_web.empty:
+            st.error("⚠️ La hoja 'Precios_Web' está vacía o no se pudo leer.")
+            return pd.DataFrame()
+
+        # Limpieza de encabezados
+        df_web.columns = df_web.columns.str.strip()
+        
+        # --- DIAGNÓSTICO VISUAL (Para que veas qué está leyendo) ---
+        with st.expander("🕵️ Ver qué está leyendo el Robot de Google Sheets"):
+            st.write("Columnas detectadas:", df_web.columns.tolist())
+            st.dataframe(df_web.head())
+
+        # Selección de Columnas
+        col_ticker = df_web.columns[0] # Asumimos columna A
+        
+        # Buscamos columna de precio por nombre común
+        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor"]
+        col_precio = None
+        for col in df_web.columns:
+            if any(p in col.lower() for p in posibles_precios):
+                col_precio = col
+                break
+        
+        # Si no encuentra por nombre, intenta la 4ta columna (común en tablas financieras)
+        if not col_precio and len(df_web.columns) > 3:
+            col_precio = df_web.columns[3]
             
-            for fila in filas:
-                celdas = fila.find_all("td")
-                if len(celdas) >= 2:
-                    texto_fila = [c.text.strip() for c in celdas]
-                    for celda_texto in texto_fila:
-                        ticker_limpio = celda_texto.upper()
-                        # Lista de tickers que nos interesan
-                        if ticker_limpio in ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL', 'CANTV', 'FVI.B']:
-                            try:
-                                for posible_precio in texto_fila:
-                                    try:
-                                        precio_str = posible_precio.replace('.', '').replace(',', '.')
-                                        precio_float = float(precio_str)
-                                        if precio_float > 0 and precio_float != float(ticker_limpio): 
-                                            precios_detectados[ticker_limpio] = precio_float
-                                            break 
-                                    except:
-                                        continue
-                            except:
-                                pass
-            return precios_detectados
+        if col_ticker and col_precio:
+            return pd.DataFrame({
+                "Ticker": df_web[col_ticker].astype(str).str.strip().str.upper(),
+                "Precio Web Raw": df_web[col_precio]
+            })
+        else:
+            st.warning(f"No encontré columna de precio. Columnas: {df_web.columns.tolist()}")
+            return pd.DataFrame()
+            
     except Exception as e:
-        print(f"Error scraping BVC: {e}")
-        return {}
-    return {}
+        st.error(f"Error técnico leyendo hoja: {e}")
+        return pd.DataFrame()
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("🇻🇪 Mi Portafolio de Inversiones")
@@ -172,49 +172,73 @@ with st.sidebar:
                 st.success(f"¡{tipo_operacion} registrada con éxito!")
                 st.rerun()
 
-# --- SECCIÓN DE PRECIOS (ACTUALIZADA CON BOTÓN Y AUTO-UPDATE) ---
+# --- SECCIÓN DE PRECIOS (LOGICA NUEVA: SHEETS -> DASHBOARD) ---
 if 'precios_mercado' not in st.session_state:
     st.session_state.precios_mercado = pd.DataFrame({"Ticker": acciones_base, "Precio Bs.": [0.0]*len(acciones_base)})
 
 st.subheader("📊 Precios de Hoy")
 
-# Columnas: Editor a la izquierda, Botón a la derecha
+# 1. Cargar datos Web con Diagnóstico
+df_web = cargar_precios_web_debug()
+precios_encontrados = {}
+
+# 2. Procesar y Mapear datos
+if not df_web.empty:
+    for index, row in df_web.iterrows():
+        t_web = str(row['Ticker'])
+        p_raw = str(row['Precio Web Raw'])
+        
+        # Limpieza de Numero Venezolano (1.200,50 -> 1200.50)
+        try:
+            p_clean = float(p_raw.replace('.', '').replace(',', '.'))
+        except:
+            p_clean = 0.0
+            
+        # Mapeo de Nombres (Búsqueda inteligente)
+        if "BNC" in t_web: precios_encontrados["BNC"] = p_clean
+        elif "MERCANTIL" in t_web and "A" in t_web: precios_encontrados["MVZ.A"] = p_clean
+        elif "MERCANTIL" in t_web and "B" in t_web: precios_encontrados["MVZ.B"] = p_clean
+        elif "CANTV" in t_web: precios_encontrados["TDV.D"] = p_clean 
+        elif "FONDO DE VALORES" in t_web and "B" in t_web: precios_encontrados["FVI.B"] = p_clean
+        elif "RON SANTA" in t_web: precios_encontrados["RST"] = p_clean
+        elif "PROTAGRO" in t_web: precios_encontrados["PTN"] = p_clean
+        elif "BOLSA DE VALORES" in t_web: precios_encontrados["BVL"] = p_clean
+        elif t_web in acciones_base: precios_encontrados[t_web] = p_clean
+
+# 3. Interfaz
 col_manual, col_auto = st.columns([3, 1])
 
 with col_auto:
-    st.write("") # Espacio para alinear
+    st.write("") # Espacio alineación
     st.write("")
-    if st.button("🔄 Buscar en Web"):
-        with st.spinner("Conectando con la Bolsa..."):
-            nuevos_precios = intentar_actualizar_precios_bvc()
-            if nuevos_precios:
-                # Actualizar solo los encontrados
-                df_temp = st.session_state.precios_mercado.copy()
-                for index, row in df_temp.iterrows():
-                    tick = row['Ticker']
-                    if tick in nuevos_precios:
-                        df_temp.at[index, 'Precio Bs.'] = nuevos_precios[tick]
-                
-                st.session_state.precios_mercado = df_temp
-                st.success(f"¡Actualizadas {len(nuevos_precios)} acciones!")
-                st.rerun()
-            else:
-                st.error("Sin conexión BVC. Usa modo manual.")
+    if st.button("🔄 Cargar de Sheets"):
+        if precios_encontrados:
+            df_edit = st.session_state.precios_mercado.copy()
+            count = 0
+            for i, row in df_edit.iterrows():
+                tick = row['Ticker']
+                if tick in precios_encontrados and precios_encontrados[tick] > 0:
+                    df_edit.at[i, 'Precio Bs.'] = precios_encontrados[tick]
+                    count += 1
+            st.session_state.precios_mercado = df_edit
+            st.success(f"¡{count} precios actualizados!")
+            st.rerun()
+        else:
+            st.warning("No pude asociar los nombres de la hoja con tus acciones.")
 
 with col_manual:
     with st.expander("📝 Editar precios manualmente", expanded=True):
-        df_precios = st.data_editor(
+        st.session_state.precios_mercado = st.data_editor(
             st.session_state.precios_mercado,
             column_config={"Precio Bs.": st.column_config.NumberColumn(format="%.2f Bs")},
             hide_index=True,
             use_container_width=True
         )
-        st.session_state.precios_mercado = df_precios
 
 # --- CÁLCULOS Y KPIs ---
 if not df_portafolio.empty:
     
-    df_final = df_portafolio.merge(df_precios, on="Ticker", how="left")
+    df_final = df_portafolio.merge(st.session_state.precios_mercado, on="Ticker", how="left")
     
     df_final["Inv. Total (Bs)"] = df_final["Total Invertido (Bs)"]
     df_final["Valor Hoy (Bs)"] = df_final["Cantidad"] * df_final["Precio Bs."]
@@ -307,4 +331,5 @@ if not df_portafolio.empty:
         st.warning(f"No hay movimientos para {periodo}.")
 
 else:
+    st.info("👈 Registra tu primera compra para empezar.")
     st.info("👈 Registra tu primera compra para empezar.")
