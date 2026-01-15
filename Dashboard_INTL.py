@@ -213,7 +213,7 @@ if not df_portafolio.empty:
     t1, t2, t3 = st.tabs(["📊 Portafolio", "🔍 Buscador", "📅 Reportes"])
 
 # --- TAB 1: PORTAFOLIO (ESTILO VISUAL PRO) ---
-    with tab1:
+    with t1:
         st.markdown("### 💰 Estado de Cuenta")
         
         # --- SECCIÓN DÓLARES ---
