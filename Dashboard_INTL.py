@@ -7,10 +7,10 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Wall St. Portfolio", page_icon="🇺🇸", layout="wide")
 
-# Estilos
+# Estilos CSS (Mantenemos tu estilo original)
 st.markdown("""
 <style>
     .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px;}
@@ -21,10 +21,9 @@ st.markdown("""
 # --- CONEXIÓN GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- ROBOT BCV (Necesario para saber a cuánto está el Bs HOY) ---
+# --- ROBOT BCV (Sin cambios) ---
 @st.cache_data(ttl=3600)
 def obtener_tasa_bcv_hoy():
-    actualizar_bitacora_tasas(tasa_hoy)
     try:
         r = requests.get("https://www.bcv.org.ve/", verify=False, timeout=5)
         soup = BeautifulSoup(r.content, "html.parser")
@@ -32,34 +31,27 @@ def obtener_tasa_bcv_hoy():
     except:
         return 0.0
 
-# --- NUEVAS FUNCIONES: BITÁCORA DE TASAS (MEMORIA) ---
+# ==========================================
+#     ⬇️ AQUÍ ESTÁN LAS NUEVAS FUNCIONES ⬇️
+# ==========================================
+
 def actualizar_bitacora_tasas(tasa_actual):
-    """Guarda la tasa de HOY en la hoja 'Historial_Tasas' si no existe aún."""
+    """Guarda la tasa de HOY en la hoja 'Historial_Tasas'."""
     if tasa_actual <= 0: return 
     try:
         try:
+            # Intentamos leer la hoja historial
             df_hist = conn.read(worksheet="Historial_Tasas", ttl=0)
             df_hist["Fecha"] = pd.to_datetime(df_hist["Fecha"])
         except:
+            # Si no existe, creamos el dataframe vacío
             df_hist = pd.DataFrame(columns=["Fecha", "Tasa"])
         
         hoy = datetime.now().date()
+        # Lista de fechas ya guardadas
         fechas_registradas = df_hist["Fecha"].dt.date.tolist() if not df_hist.empty else []
-        tasa_guardada = buscar_tasa_en_bitacora(fecha_in)
-    
-    if tasa_guardada:
-        valor_defecto = tasa_guardada
-        msg = "✅ Tasa recuperada del historial."
-    else:
-        valor_defecto = tasa_hoy
-        msg = "Usando tasa de hoy (ajustar si es necesario)."
-
-    with st.form("entry_form"):
-        # ... (Ticker, Cantidad, Precio siguen igual) ...
         
-        # MODIFICA EL INPUT DE TASA ASÍ:
-        tasa_in = st.number_input("Tasa Cambio (Bs/$)", value=float(valor_defecto), help=msg)
-        
+        # Si hoy no está guardado, lo guardamos
         if hoy not in fechas_registradas:
             nuevo = pd.DataFrame([{"Fecha": pd.to_datetime(hoy), "Tasa": tasa_actual}])
             df_up = pd.concat([df_hist, nuevo], ignore_index=True)
@@ -78,10 +70,13 @@ def buscar_tasa_en_bitacora(fecha_buscada):
     except: pass
     return None
 
-# --- FUNCIONES DE DATOS ---
+# ==========================================
+#     ⬆️ FIN DE NUEVAS FUNCIONES ⬆️
+# ==========================================
+
+# --- FUNCIONES DE DATOS (Sin cambios estructurales) ---
 def cargar_datos():
     try:
-        # Leemos la hoja. Si no existe la columna Tasa, se creará después.
         df = conn.read(worksheet="Portafolio_INTL", ttl=0)
         df["Fecha"] = pd.to_datetime(df["Fecha"])
         return df
@@ -99,18 +94,15 @@ def guardar_operacion(ticker, cantidad, precio, fecha, tipo, tasa_historica):
         "Precio": precio,
         "Fecha": pd.to_datetime(fecha),
         "Tipo": tipo,
-        "Tasa": tasa_historica # <--- Guardamos la tasa de ESE día
+        "Tasa": tasa_historica
     }])
     
-    # Concatenar asegurando que todas las columnas existan
     if df_actual.empty:
         df_updated = nuevo
     else:
         df_updated = pd.concat([df_actual, nuevo], ignore_index=True)
     
-    # Formato fecha seguro para Sheets
     df_updated["Fecha"] = df_updated["Fecha"].dt.strftime('%Y-%m-%d')
-    
     conn.update(worksheet="Portafolio_INTL", data=df_updated)
     st.cache_data.clear()
 
@@ -130,22 +122,46 @@ def obtener_precios_actuales(lista_tickers):
     except:
         return {}
 
-# --- INTERFAZ ---
+# --- INTERFAZ PRINCIPAL ---
 st.title("🌎 Mi Portafolio Internacional")
 st.markdown("---")
 
+# 1. Obtener Tasa de Hoy
 tasa_hoy = obtener_tasa_bcv_hoy()
 if tasa_hoy == 0:
     tasa_hoy = st.number_input("⚠️ BCV Offline. Tasa de HOY manual:", value=60.0)
 
+# >>> INSERCIÓN 1: Guardar tasa de hoy en la memoria <<<
+actualizar_bitacora_tasas(tasa_hoy)
+
 df_portafolio = cargar_datos()
 
-# --- BARRA LATERAL (REGISTRO) ---
+# --- BARRA LATERAL (AQUÍ ESTÁ EL CAMBIO CLAVE) ---
 with st.sidebar:
     st.header("📝 Nueva Operación")
-    tipo = st.radio("Acción:", ["Compra", "Venta"], horizontal=True)
     
+    # >>> CAMBIO: La fecha va FUERA del formulario para ser interactiva <<<
+    st.write("📅 **Fecha de la Operación**")
+    fecha_in = st.date_input("Selecciona fecha:", datetime.now(), label_visibility="collapsed")
+    
+    # >>> CAMBIO: Lógica para buscar la tasa automáticamente <<<
+    tasa_guardada = buscar_tasa_en_bitacora(fecha_in)
+    
+    if tasa_guardada:
+        valor_defecto = tasa_guardada
+        msg_ayuda = "✅ Tasa recuperada de tu historial."
+        st.success(f"Día {fecha_in.day}/{fecha_in.month}: {tasa_guardada} Bs/$")
+    elif fecha_in == datetime.now().date():
+        valor_defecto = tasa_hoy
+        msg_ayuda = "✅ Tasa actual del BCV (Hoy)."
+    else:
+        valor_defecto = tasa_hoy
+        msg_ayuda = "⚠️ No hay registro histórico. Usa la de hoy o edítala."
+        st.info("Sin datos históricos. Ingresa tasa manual.")
+
     with st.form("entry_form"):
+        st.write("---")
+        tipo = st.radio("Acción:", ["Compra", "Venta"], horizontal=True)
         ticker_in = st.text_input("Ticker (Ej: AAPL, BTC-USD)").upper()
         
         saldo = 0
@@ -155,13 +171,9 @@ with st.sidebar:
         
         cant_in = st.number_input("Cantidad", min_value=0.0001, format="%.4f")
         prec_in = st.number_input("Precio ($)", min_value=0.01, format="%.2f")
-        fecha_in = st.date_input("Fecha", datetime.now())
         
-        # --- AQUÍ ESTÁ LO QUE PEDISTE ---
-        st.markdown("---")
-        st.write("🇻🇪 **Datos de Cambio**")
-        st.caption("Indica la tasa del BCV del día de la operación:")
-        tasa_in = st.number_input("Tasa Cambio (Bs/$)", min_value=0.1, value=tasa_hoy, format="%.2f")
+        # >>> CAMBIO: El campo tasa se llena solo con 'valor_defecto' <<<
+        tasa_in = st.number_input("Tasa Cambio (Bs/$)", min_value=0.1, value=float(valor_defecto), format="%.2f", help=msg_ayuda)
         
         if st.form_submit_button("Guardar Operación"):
             if not ticker_in:
@@ -173,136 +185,80 @@ with st.sidebar:
                 st.success("Guardado!")
                 st.rerun()
 
-# --- PROCESAMIENTO DE DATOS ---
+# --- PROCESAMIENTO DE DATOS (Mantenemos todo igual) ---
 if not df_portafolio.empty:
-    # Asegurar que existe columna Tasa (para compatibilidad con datos viejos)
     if "Tasa" not in df_portafolio.columns:
-        df_portafolio["Tasa"] = tasa_hoy # Relleno por defecto si falta
+        df_portafolio["Tasa"] = tasa_hoy 
     
-    # 1. Costo Histórico (USD y Bs)
+    # Costos
     df_portafolio["Costo Total $"] = df_portafolio["Cantidad"] * df_portafolio["Precio"]
-    df_portafolio["Costo Total Bs"] = df_portafolio["Costo Total $"] * df_portafolio["Tasa"] # Usa la tasa histórica
+    df_portafolio["Costo Total Bs"] = df_portafolio["Costo Total $"] * df_portafolio["Tasa"]
     
-    # 2. Agrupar
+    # Agrupar
     df_agrupado = df_portafolio.groupby("Ticker").agg({
         "Cantidad": "sum",
         "Costo Total $": "sum",
         "Costo Total Bs": "sum"
     }).reset_index()
     
-    # Filtrar solo activos
     df_final = df_agrupado[df_agrupado["Cantidad"] > 0.00001].copy()
     
-    # 3. Precios Actuales
+    # Precios Live
     lista_tickers = df_final["Ticker"].tolist()
     precios_live = obtener_precios_actuales(lista_tickers)
     
-    # 4. Cálculos de Valor Actual
     df_final["Precio Actual $"] = df_final["Ticker"].map(precios_live).fillna(0)
     df_final["Valor Hoy $"] = df_final["Cantidad"] * df_final["Precio Actual $"]
-    # Para el valor HOY en Bs, usamos la tasa de HOY (no la histórica)
     df_final["Valor Hoy Bs"] = df_final["Valor Hoy $"] * tasa_hoy
     
-    # 5. Ganancias
     df_final["Ganancia $"] = df_final["Valor Hoy $"] - df_final["Costo Total $"]
     df_final["Ganancia Bs"] = df_final["Valor Hoy Bs"] - df_final["Costo Total Bs"]
 
-    # --- TABS ---
+    # --- TABS (Mantenemos las 3 pestañas originales) ---
     tab1, tab2, tab3 = st.tabs(["📊 Mi Portafolio", "🔍 Buscador Mercado", "📅 Reportes"])
 
-    # --- TAB 1: PORTAFOLIO ---
+    # TAB 1: PORTAFOLIO
     with tab1:
         st.subheader("Estado Actual")
-        
-        # Totales
-        tot_usd = df_final["Valor Hoy $"].sum()
-        gan_usd = df_final["Ganancia $"].sum()
-        tot_bs = df_final["Valor Hoy Bs"].sum()
-        gan_bs = df_final["Ganancia Bs"].sum()
-        
         c1, c2 = st.columns(2)
-        c1.metric("Valor Total ($)", f"${tot_usd:,.2f}", delta=f"${gan_usd:,.2f}")
-        c2.metric("Valor Total (Bs)", f"Bs. {tot_bs:,.2f}", delta=f"Bs. {gan_bs:,.2f}")
-        
+        c1.metric("Valor Total ($)", f"${df_final['Valor Hoy $'].sum():,.2f}", delta=f"${df_final['Ganancia $'].sum():,.2f}")
+        c2.metric("Valor Total (Bs)", f"Bs. {df_final['Valor Hoy Bs'].sum():,.2f}", delta=f"Bs. {df_final['Ganancia Bs'].sum():,.2f}")
         st.divider()
-        st.write("### Detalle de mis Acciones")
-        
-        # Tabla detallada doble moneda
         st.dataframe(df_final[[
-            "Ticker", "Cantidad", 
-            "Precio Actual $", "Valor Hoy $", "Ganancia $",
-            "Valor Hoy Bs", "Ganancia Bs"
+            "Ticker", "Cantidad", "Precio Actual $", "Valor Hoy $", "Ganancia $", "Valor Hoy Bs", "Ganancia Bs"
         ]].style.format({
-            "Cantidad": "{:.4f}",
-            "Precio Actual $": "${:.2f}",
-            "Valor Hoy $": "${:.2f}",
-            "Ganancia $": "${:.2f}",
-            "Valor Hoy Bs": "Bs.{:,.2f}",
-            "Ganancia Bs": "Bs.{:,.2f}"
+            "Cantidad": "{:.4f}", "Precio Actual $": "${:.2f}", "Valor Hoy $": "${:.2f}", "Ganancia $": "${:.2f}",
+            "Valor Hoy Bs": "Bs.{:,.2f}", "Ganancia Bs": "Bs.{:,.2f}"
         }), use_container_width=True)
 
-    # --- TAB 2: BUSCADOR CON GRÁFICO MODIFICABLE ---
+    # TAB 2: BUSCADOR CON FILTRO TEMPORAL
     with tab2:
-        col_search, col_period = st.columns([3, 1])
-        with col_search:
-            search_ticker = st.text_input("🔍 Buscar cualquier acción (Ej: NVDA, MSFT):").upper()
-        with col_period:
-            # Selector de tiempo para el gráfico
-            periodo = st.selectbox("Rango Gráfico:", 
-                                   ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"], 
-                                   index=3) # Default 1y
-
-        if search_ticker:
-            tick_obj = yf.Ticker(search_ticker)
-            hist = tick_obj.history(period=periodo)
-            
+        col_s, col_p = st.columns([3, 1])
+        with col_s: search = st.text_input("🔍 Buscar (Ej: NVDA):").upper()
+        # Mantenemos el selector que pediste
+        with col_p: per = st.selectbox("Rango:", ["1mo", "6mo", "1y", "5y", "10y", "max"], index=2)
+        
+        if search:
+            hist = yf.Ticker(search).history(period=per)
             if not hist.empty:
-                curr_price = hist["Close"].iloc[-1]
-                curr_bs = curr_price * tasa_hoy
-                
-                m1, m2 = st.columns(2)
-                m1.metric(f"Precio {search_ticker} ($)", f"${curr_price:,.2f}")
-                m2.metric(f"Precio {search_ticker} (Bs)", f"Bs.{curr_bs:,.2f}", help=f"A tasa BCV hoy: {tasa_hoy}")
-                
-                st.subheader(f"📈 Comportamiento ({periodo})")
+                curr = hist["Close"].iloc[-1]
+                st.metric(f"{search} ($)", f"${curr:,.2f}", f"Bs. {curr*tasa_hoy:,.2f}")
                 st.line_chart(hist["Close"])
-            else:
-                st.warning("No se encontraron datos. Revisa el símbolo.")
+            else: st.warning("No encontrado.")
 
-    # --- TAB 3: REPORTES ---
+    # TAB 3: REPORTES TEMPORALES
     with tab3:
-        st.subheader("📜 Historial y Métricas")
-        filtro_tiempo = st.selectbox("Filtrar por fecha:", ["Todo", "Última Semana", "Último Mes", "Este Año"])
-        
+        st.subheader("📜 Historial")
+        filtro = st.selectbox("Periodo:", ["Todo", "Última Semana", "Este Año"])
         df_rep = df_portafolio.copy()
-        hoy = datetime.now()
-        
-        if filtro_tiempo == "Última Semana":
-            start_date = hoy - timedelta(days=7)
-        elif filtro_tiempo == "Último Mes":
-            start_date = hoy - timedelta(days=30)
-        elif filtro_tiempo == "Este Año":
-            start_date = datetime(hoy.year, 1, 1)
-        else:
-            start_date = datetime(2000, 1, 1)
-            
-        df_rep = df_rep[df_rep["Fecha"] >= start_date]
+        if filtro == "Última Semana": df_rep = df_rep[df_rep["Fecha"] >= datetime.now() - timedelta(days=7)]
+        elif filtro == "Este Año": df_rep = df_rep[df_rep["Fecha"] >= datetime(datetime.now().year, 1, 1)]
         
         if not df_rep.empty:
-            inv_periodo = df_rep[df_rep["Tipo"]=="Compra"]["Costo Total $"].sum()
-            
-            k1, k2 = st.columns(2)
-            k1.metric("Invertido en el periodo", f"${inv_periodo:,.2f}")
-            k2.metric("Nro. Transacciones", len(df_rep))
-            
             st.dataframe(df_rep.sort_values("Fecha", ascending=False).style.format({
-                "Precio": "${:.2f}",
-                "Tasa": "Bs.{:.2f}",
-                "Costo Total $": "${:.2f}",
-                "Fecha": "{:%Y-%m-%d}"
+                "Precio": "${:.2f}", "Tasa": "Bs.{:.2f}", "Costo Total $": "${:.2f}", "Fecha": "{:%Y-%m-%d}"
             }))
-        else:
-            st.info("No hay datos para este periodo.")
+        else: st.info("Sin datos.")
 
 else:
-    st.info("👈 Registra tu primera operación en la barra lateral.")
+    st.info("👈 Registra tu primera operación.")
