@@ -73,39 +73,34 @@ def obtener_tasa_bcv():
     except:
         return 0.0
 
-# --- NUEVA FUNCIÓN: LEER PRECIOS DESDE GOOGLE SHEETS (CON DIAGNÓSTICO) ---
+# --- NUEVA FUNCIÓN: LEER PRECIOS DESDE GOOGLE SHEETS ---
 def cargar_precios_web_debug():
-    """Lee la hoja Precios_Web intentando adivinar la estructura."""
+    """Lee la hoja Precios_Web buscando columnas de Ticker y Precio."""
     try:
         # Leemos la hoja completa
         df_web = conn.read(worksheet="Precios_Web", ttl=0)
         
         if df_web.empty:
-            st.error("⚠️ La hoja 'Precios_Web' está vacía o no se pudo leer.")
+            st.warning("⚠️ La hoja 'Precios_Web' parece estar vacía.")
             return pd.DataFrame()
 
         # Limpieza de encabezados
         df_web.columns = df_web.columns.str.strip()
         
-        # --- DIAGNÓSTICO VISUAL (Para que veas qué está leyendo) ---
-        with st.expander("🕵️ Ver qué está leyendo el Robot de Google Sheets"):
-            st.write("Columnas detectadas:", df_web.columns.tolist())
-            st.dataframe(df_web.head())
-
-        # Selección de Columnas
-        col_ticker = df_web.columns[0] # Asumimos columna A
+        # Selección inteligente de Columnas
+        col_ticker = df_web.columns[0] 
         
-        # Buscamos columna de precio por nombre común
-        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor"]
+        # Buscamos columna de Precio
+        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor", "cotización", "bolivar", "bs"]
         col_precio = None
         for col in df_web.columns:
             if any(p in col.lower() for p in posibles_precios):
                 col_precio = col
                 break
         
-        # Si no encuentra por nombre, intenta la 4ta columna (común en tablas financieras)
-        if not col_precio and len(df_web.columns) > 3:
-            col_precio = df_web.columns[3]
+        # Si no la encuentra por nombre, usa la columna 2 (índice 1) por defecto
+        if not col_precio and len(df_web.columns) >= 2:
+            col_precio = df_web.columns[1]
             
         if col_ticker and col_precio:
             return pd.DataFrame({
@@ -113,7 +108,6 @@ def cargar_precios_web_debug():
                 "Precio Web Raw": df_web[col_precio]
             })
         else:
-            st.warning(f"No encontré columna de precio. Columnas: {df_web.columns.tolist()}")
             return pd.DataFrame()
             
     except Exception as e:
@@ -172,44 +166,60 @@ with st.sidebar:
                 st.success(f"¡{tipo_operacion} registrada con éxito!")
                 st.rerun()
 
-# --- SECCIÓN DE PRECIOS (LOGICA NUEVA: SHEETS -> DASHBOARD) ---
+# --- SECCIÓN DE PRECIOS (CONECTADA A GOOGLE SHEETS) ---
 if 'precios_mercado' not in st.session_state:
     st.session_state.precios_mercado = pd.DataFrame({"Ticker": acciones_base, "Precio Bs.": [0.0]*len(acciones_base)})
 
 st.subheader("📊 Precios de Hoy")
 
-# 1. Cargar datos Web con Diagnóstico
+# Cargar datos de la Hoja
 df_web = cargar_precios_web_debug()
 precios_encontrados = {}
 
-# 2. Procesar y Mapear datos
+# Procesar datos si existen
 if not df_web.empty:
     for index, row in df_web.iterrows():
         t_web = str(row['Ticker'])
         p_raw = str(row['Precio Web Raw'])
         
-        # Limpieza de Numero Venezolano (1.200,50 -> 1200.50)
         try:
             p_clean = float(p_raw.replace('.', '').replace(',', '.'))
         except:
             p_clean = 0.0
             
-        # Mapeo de Nombres (Búsqueda inteligente)
-        if "BNC" in t_web: precios_encontrados["BNC"] = p_clean
-        elif "MERCANTIL" in t_web and "A" in t_web: precios_encontrados["MVZ.A"] = p_clean
-        elif "MERCANTIL" in t_web and "B" in t_web: precios_encontrados["MVZ.B"] = p_clean
-        elif "CANTV" in t_web: precios_encontrados["TDV.D"] = p_clean 
-        elif "FONDO DE VALORES" in t_web and "B" in t_web: precios_encontrados["FVI.B"] = p_clean
-        elif "RON SANTA" in t_web: precios_encontrados["RST"] = p_clean
-        elif "PROTAGRO" in t_web: precios_encontrados["PTN"] = p_clean
-        elif "BOLSA DE VALORES" in t_web: precios_encontrados["BVL"] = p_clean
-        elif t_web in acciones_base: precios_encontrados[t_web] = p_clean
+        # --- DICCIONARIO DE TRADUCCIÓN AMPLIADO ---
+        # 1. Coincidencia Exacta (Si en el Excel dice BNC)
+        if t_web in acciones_base:
+            precios_encontrados[t_web] = p_clean
+            
+        # 2. Coincidencia Parcial (Si en el Excel dice "BANCO NACIONAL...")
+        else:
+            if "BNC" in t_web or "NACIONAL DE CREDITO" in t_web: precios_encontrados["BNC"] = p_clean
+            
+            elif "MERCANTIL" in t_web:
+                if "A" in t_web: precios_encontrados["MVZ.A"] = p_clean
+                if "B" in t_web: precios_encontrados["MVZ.B"] = p_clean # (Opcional si usas la B)
+            
+            elif "CANTV" in t_web: precios_encontrados["TDV.D"] = p_clean
+            
+            elif "SANTA TERESA" in t_web or "RST" in t_web: precios_encontrados["RST"] = p_clean
+            
+            # --- LOS QUE FALTABAN ---
+            elif "PROAGRO" in t_web or "PTN" in t_web or "PROTINAL" in t_web: precios_encontrados["PTN"] = p_clean
+            
+            elif "BOLSA DE VALORES" in t_web or "BVL" in t_web: precios_encontrados["BVL"] = p_clean
+            
+            elif "FONDO DE VALORES" in t_web or "FVI" in t_web:
+                if "B" in t_web: precios_encontrados["FVI.B"] = p_clean
+            
+            elif "INVACA" in t_web or "IVC" in t_web: precios_encontrados["IVC.A"] = p_clean
+            
+            elif "GIZLA" in t_web or "GZL" in t_web: precios_encontrados["GZL"] = p_clean
 
-# 3. Interfaz
 col_manual, col_auto = st.columns([3, 1])
 
 with col_auto:
-    st.write("") # Espacio alineación
+    st.write("") # Espacio
     st.write("")
     if st.button("🔄 Cargar de Sheets"):
         if precios_encontrados:
@@ -224,7 +234,7 @@ with col_auto:
             st.success(f"¡{count} precios actualizados!")
             st.rerun()
         else:
-            st.warning("No pude asociar los nombres de la hoja con tus acciones.")
+            st.warning("No se encontraron coincidencias. Revisa los nombres en tu Sheet.")
 
 with col_manual:
     with st.expander("📝 Editar precios manualmente", expanded=True):
@@ -255,7 +265,6 @@ if not df_portafolio.empty:
     # --- KPIs DOBLE MONEDA ---
     st.markdown("### 💰 Estado de Cuenta")
     
-    # Calculamos totales
     total_bs = df_final["Valor Hoy (Bs)"].sum()
     total_usd = df_final["Valor Hoy ($)"].sum()
     
@@ -331,5 +340,4 @@ if not df_portafolio.empty:
         st.warning(f"No hay movimientos para {periodo}.")
 
 else:
-    st.info("👈 Registra tu primera compra para empezar.")
     st.info("👈 Registra tu primera compra para empezar.")
