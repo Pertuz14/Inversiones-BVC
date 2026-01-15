@@ -212,11 +212,72 @@ if not df_portafolio.empty:
     # TABS
     t1, t2, t3 = st.tabs(["📊 Portafolio", "🔍 Buscador", "📅 Reportes"])
 
-    with t1:
-        c1, c2 = st.columns(2)
-        c1.metric("Total ($)", f"${df_final['Valor Hoy $'].sum():,.2f}", delta=f"${df_final['Ganancia $'].sum():,.2f}")
-        c2.metric("Total (Bs)", f"Bs.{df_final['Valor Hoy Bs'].sum():,.2f}", delta=f"Bs.{df_final['Ganancia Bs'].sum():,.2f}")
-        st.dataframe(df_final, use_container_width=True)
+# --- TAB 1: PORTAFOLIO (ESTILO VISUAL PRO) ---
+    with tab1:
+        st.markdown("### 💰 Estado de Cuenta")
+        
+        # --- SECCIÓN DÓLARES ---
+        st.markdown("##### 💵 Referencia en Divisas")
+        
+        # Cálculos de Totales
+        total_usd = df_final["Valor Hoy $"].sum()
+        ganancia_usd = df_final["Ganancia $"].sum()
+        invertido_usd = df_final["Costo Total $"].sum()
+        rentabilidad_total = (ganancia_usd / invertido_usd * 100) if invertido_usd != 0 else 0
+        
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Valor Cartera ($)", f"${total_usd:,.2f}")
+        k2.metric("Ganancia Neta ($)", f"${ganancia_usd:,.2f}", delta=f"{rentabilidad_total:.2f}%")
+        k3.metric("Total Invertido ($)", f"${invertido_usd:,.2f}")
+        k4.metric("Rentabilidad", f"{rentabilidad_total:.2f}%")
+        
+        # --- SECCIÓN BOLÍVARES ---
+        st.markdown("##### 🇻🇪 Referencia en Bolívares")
+        
+        # Cálculos de Totales Bs
+        total_bs = df_final["Valor Hoy Bs"].sum()
+        ganancia_bs = df_final["Ganancia Bs"].sum()
+        invertido_bs = df_final["Costo Total Bs"].sum()
+        
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Valor Cartera (Bs)", f"Bs. {total_bs:,.2f}")
+        b2.metric("Ganancia Neta (Bs)", f"Bs. {ganancia_bs:,.2f}", delta_color="normal")
+        b3.metric("Total Invertido (Bs)", f"Bs. {invertido_bs:,.2f}")
+        b4.write("") # Espacio vacío para mantener alineación
+        
+        # --- PESTAÑAS INTERNAS DE GRÁFICOS ---
+        st.divider()
+        subtab_graficos, subtab_detalle = st.tabs(["📈 Distribución", "📋 Detalle"])
+        
+        with subtab_graficos:
+            col_pie, col_bar = st.columns(2)
+            
+            # Gráfico de Torta (Donut)
+            if total_usd > 0:
+                fig_pie = px.pie(df_final, values='Valor Hoy $', names='Ticker', hole=0.4)
+                fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+                col_pie.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                col_pie.info("Sin datos para graficar.")
+            
+            # Gráfico de Barras (Ganancias)
+            fig_bar = px.bar(df_final, x='Ticker', y='Ganancia $', color='Ganancia $', color_continuous_scale="RdBu")
+            fig_bar.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+            col_bar.plotly_chart(fig_bar, use_container_width=True)
+            
+        with subtab_detalle:
+            st.dataframe(df_final[[
+                "Ticker", "Cantidad", 
+                "Precio Actual $", "Valor Hoy $", "Ganancia $",
+                "Valor Hoy Bs", "Ganancia Bs"
+            ]].style.format({
+                "Cantidad": "{:.4f}",
+                "Precio Actual $": "${:.2f}",
+                "Valor Hoy $": "${:.2f}",
+                "Ganancia $": "${:.2f}",
+                "Valor Hoy Bs": "Bs.{:,.2f}",
+                "Ganancia Bs": "Bs.{:,.2f}"
+            }), use_container_width=True)
 
     with t2:
         col_s, col_p = st.columns([3, 1])
@@ -231,11 +292,82 @@ if not df_portafolio.empty:
             else: st.warning("No encontrado.")
 
     with t3:
-        filtro = st.selectbox("Periodo:", ["Todo", "Última Semana", "Este Año"])
-        df_rep = df_portafolio.copy()
-        if filtro == "Última Semana": df_rep = df_rep[df_rep["Fecha"] >= datetime.now() - timedelta(days=7)]
-        elif filtro == "Este Año": df_rep = df_rep[df_rep["Fecha"] >= datetime(datetime.now().year, 1, 1)]
-        st.dataframe(df_rep.sort_values("Fecha", ascending=False), use_container_width=True)
-
+        st.subheader("📅 Análisis de Rendimiento Histórico")
+        
+        # 1. Filtro de Tiempo
+        periodo_selec = st.selectbox("Seleccionar Plazo:", ["Todo el Historial", "Última Semana", "Último Mes", "Este Año"])
+        
+        # 2. Filtrar Datos por Fecha
+        df_hist = df_portafolio.copy()
+        hoy = datetime.now()
+        
+        if periodo_selec == "Última Semana": fecha_inicio = hoy - timedelta(days=7)
+        elif periodo_selec == "Último Mes": fecha_inicio = hoy - timedelta(days=30)
+        elif periodo_selec == "Este Año": fecha_inicio = datetime(hoy.year, 1, 1)
+        else: fecha_inicio = datetime(2000, 1, 1)
+            
+        df_filtrado = df_hist[df_hist["Fecha"] >= fecha_inicio]
+        
+        if not df_filtrado.empty:
+            # Separamos las COMPRAS para ver rendimiento de la inversión nueva
+            df_compras = df_filtrado[df_filtrado["Tipo"] == "Compra"].copy()
+            
+            if not df_compras.empty:
+                # --- CÁLCULOS FINANCIEROS ---
+                
+                # A. Lo que gastaste (Invertido)
+                # Costo Bs usa la Tasa Histórica (la del día que compraste)
+                invertido_usd = df_compras["Costo Total $"].sum()
+                invertido_bs = df_compras["Costo Total Bs"].sum() 
+                
+                # B. Lo que vale AHORA eso que compraste
+                # Buscamos precio fresco para estas acciones específicas
+                tickers_periodo = df_compras["Ticker"].unique().tolist()
+                precios_reporte = obtener_precios_actuales(tickers_periodo)
+                
+                df_compras["Precio Actual"] = df_compras["Ticker"].map(precios_reporte).fillna(0)
+                
+                # Valor Hoy $ = Cantidad Comprada * Precio Actual
+                df_compras["Valor Hoy $"] = df_compras["Cantidad"] * df_compras["Precio Actual"]
+                
+                # Valor Hoy Bs = Valor Hoy $ * Tasa HOY (porque si vendes hoy, recibes tasa actual)
+                df_compras["Valor Hoy Bs"] = df_compras["Valor Hoy $"] * tasa_hoy
+                
+                valor_hoy_usd = df_compras["Valor Hoy $"].sum()
+                valor_hoy_bs = df_compras["Valor Hoy Bs"].sum()
+                
+                # C. Ganancias (Valor Hoy - Costo Viejo)
+                ganancia_usd = valor_hoy_usd - invertido_usd
+                ganancia_bs = valor_hoy_bs - invertido_bs
+                
+                # D. Rentabilidad %
+                rentabilidad = (ganancia_usd / invertido_usd * 100) if invertido_usd > 0 else 0
+                
+                # --- VISUALIZACIÓN DE MÉTRICAS ---
+                st.markdown(f"##### 📊 Rendimiento de compras: {periodo_selec}")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Invertido ($)", f"${invertido_usd:,.2f}")
+                col2.metric("Ganancia ($)", f"${ganancia_usd:,.2f}", delta=f"{rentabilidad:.2f}%")
+                col3.metric("Ganancia (Bs)", f"Bs. {ganancia_bs:,.2f}", delta="Vs. Costo Histórico")
+                col4.metric("Rentabilidad", f"{rentabilidad:.2f}%")
+                
+                st.divider()
+            else:
+                st.info(f"No realizaste nuevas compras en {periodo_selec} (solo ventas o inactividad).")
+            
+            # Tabla de Movimientos
+            st.write("📜 **Detalle de Movimientos**")
+            st.dataframe(df_filtrado.sort_values("Fecha", ascending=False)[[
+                "Fecha", "Ticker", "Tipo", "Cantidad", "Precio", "Tasa", "Costo Total $"
+            ]].style.format({
+                "Precio": "${:.2f}",
+                "Tasa": "Bs.{:.2f}",
+                "Costo Total $": "${:.2f}",
+                "Fecha": "{:%Y-%m-%d}"
+            }), use_container_width=True)
+            
+        else:
+            st.warning("No hay registros en este periodo.")
 else:
     st.info("👈 Registra tu primera operación.")
