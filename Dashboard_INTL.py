@@ -24,12 +24,59 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # --- ROBOT BCV (Necesario para saber a cuánto está el Bs HOY) ---
 @st.cache_data(ttl=3600)
 def obtener_tasa_bcv_hoy():
+    actualizar_bitacora_tasas(tasa_hoy)
     try:
         r = requests.get("https://www.bcv.org.ve/", verify=False, timeout=5)
         soup = BeautifulSoup(r.content, "html.parser")
         return float(soup.find("div", {"id": "dolar"}).find("strong").text.strip().replace(',', '.'))
     except:
         return 0.0
+
+# --- NUEVAS FUNCIONES: BITÁCORA DE TASAS (MEMORIA) ---
+def actualizar_bitacora_tasas(tasa_actual):
+    """Guarda la tasa de HOY en la hoja 'Historial_Tasas' si no existe aún."""
+    if tasa_actual <= 0: return 
+    try:
+        try:
+            df_hist = conn.read(worksheet="Historial_Tasas", ttl=0)
+            df_hist["Fecha"] = pd.to_datetime(df_hist["Fecha"])
+        except:
+            df_hist = pd.DataFrame(columns=["Fecha", "Tasa"])
+        
+        hoy = datetime.now().date()
+        fechas_registradas = df_hist["Fecha"].dt.date.tolist() if not df_hist.empty else []
+        tasa_guardada = buscar_tasa_en_bitacora(fecha_in)
+    
+    if tasa_guardada:
+        valor_defecto = tasa_guardada
+        msg = "✅ Tasa recuperada del historial."
+    else:
+        valor_defecto = tasa_hoy
+        msg = "Usando tasa de hoy (ajustar si es necesario)."
+
+    with st.form("entry_form"):
+        # ... (Ticker, Cantidad, Precio siguen igual) ...
+        
+        # MODIFICA EL INPUT DE TASA ASÍ:
+        tasa_in = st.number_input("Tasa Cambio (Bs/$)", value=float(valor_defecto), help=msg)
+        
+        if hoy not in fechas_registradas:
+            nuevo = pd.DataFrame([{"Fecha": pd.to_datetime(hoy), "Tasa": tasa_actual}])
+            df_up = pd.concat([df_hist, nuevo], ignore_index=True)
+            df_up["Fecha"] = df_up["Fecha"].dt.strftime('%Y-%m-%d')
+            conn.update(worksheet="Historial_Tasas", data=df_up)
+    except Exception as e:
+        print(f"Error bitácora: {e}")
+
+def buscar_tasa_en_bitacora(fecha_buscada):
+    """Busca si tenemos guardada la tasa de una fecha específica."""
+    try:
+        df_hist = conn.read(worksheet="Historial_Tasas", ttl=600)
+        df_hist["Fecha"] = pd.to_datetime(df_hist["Fecha"]).dt.date
+        fila = df_hist[df_hist["Fecha"] == fecha_buscada]
+        if not fila.empty: return float(fila.iloc[0]["Tasa"])
+    except: pass
+    return None
 
 # --- FUNCIONES DE DATOS ---
 def cargar_datos():
