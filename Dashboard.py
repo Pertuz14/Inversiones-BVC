@@ -73,9 +73,9 @@ def obtener_tasa_bcv():
     except:
         return 0.0
 
-# --- NUEVA FUNCIÓN: LEER PRECIOS DESDE GOOGLE SHEETS ---
+# --- NUEVA FUNCIÓN CORREGIDA: Busca la columna 'Símbolo' ---
 def cargar_precios_web_debug():
-    """Lee la hoja Precios_Web buscando columnas de Ticker y Precio."""
+    """Lee la hoja Precios_Web buscando columnas de Símbolo y Precio."""
     try:
         # Leemos la hoja completa
         df_web = conn.read(worksheet="Precios_Web", ttl=0)
@@ -87,20 +87,35 @@ def cargar_precios_web_debug():
         # Limpieza de encabezados
         df_web.columns = df_web.columns.str.strip()
         
-        # Selección inteligente de Columnas
-        col_ticker = df_web.columns[0] 
+        # --- CORRECCIÓN CLAVE: Buscar columna 'Símbolo' explícitamente ---
+        posibles_tickers = ["símbolo", "simbolo", "ticker", "código", "codigo"]
+        col_ticker = None
         
+        # Primero intentamos buscar por nombre
+        for col in df_web.columns:
+            if any(t in col.lower() for t in posibles_tickers):
+                col_ticker = col
+                break
+        
+        # Si no la encuentra por nombre, probamos la Columna B (índice 1) que es donde está en tu foto
+        if not col_ticker and len(df_web.columns) > 1:
+            col_ticker = df_web.columns[1]
+        
+        # Si aun así falla, usamos la primera
+        if not col_ticker: 
+            col_ticker = df_web.columns[0]
+
         # Buscamos columna de Precio
-        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor", "cotización", "bolivar", "bs"]
+        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor"]
         col_precio = None
         for col in df_web.columns:
             if any(p in col.lower() for p in posibles_precios):
                 col_precio = col
                 break
         
-        # Si no la encuentra por nombre, usa la columna 2 (índice 1) por defecto
-        if not col_precio and len(df_web.columns) >= 2:
-            col_precio = df_web.columns[1]
+        # Fallback para precio (Columna C o indice 2 en tu foto)
+        if not col_precio and len(df_web.columns) > 2:
+            col_precio = df_web.columns[2]
             
         if col_ticker and col_precio:
             return pd.DataFrame({
@@ -144,7 +159,6 @@ with st.sidebar:
         st.info(f"Tasa registro: Bs. {tasa_uso}")
         ticker_in = st.selectbox("Acción", acciones_base)
         
-        # Validación de Saldo
         saldo_actual = 0
         if not df_portafolio.empty and ticker_in in df_portafolio["Ticker"].values:
             saldo_actual = df_portafolio[df_portafolio["Ticker"] == ticker_in]["Cantidad"].sum()
@@ -166,7 +180,7 @@ with st.sidebar:
                 st.success(f"¡{tipo_operacion} registrada con éxito!")
                 st.rerun()
 
-# --- SECCIÓN DE PRECIOS (CONECTADA A GOOGLE SHEETS) ---
+# --- SECCIÓN DE PRECIOS ---
 if 'precios_mercado' not in st.session_state:
     st.session_state.precios_mercado = pd.DataFrame({"Ticker": acciones_base, "Precio Bs.": [0.0]*len(acciones_base)})
 
@@ -176,50 +190,36 @@ st.subheader("📊 Precios de Hoy")
 df_web = cargar_precios_web_debug()
 precios_encontrados = {}
 
-# Procesar datos si existen
 if not df_web.empty:
     for index, row in df_web.iterrows():
         t_web = str(row['Ticker'])
         p_raw = str(row['Precio Web Raw'])
         
         try:
+            # Limpiamos el precio (1.000,00 -> 1000.00)
             p_clean = float(p_raw.replace('.', '').replace(',', '.'))
         except:
             p_clean = 0.0
             
-        # --- DICCIONARIO DE TRADUCCIÓN AMPLIADO ---
-        # 1. Coincidencia Exacta (Si en el Excel dice BNC)
+        # Como ahora leemos la columna SIMBOLO, la coincidencia debería ser exacta
+        # Pero mantenemos la búsqueda parcial por seguridad
         if t_web in acciones_base:
             precios_encontrados[t_web] = p_clean
-            
-        # 2. Coincidencia Parcial (Si en el Excel dice "BANCO NACIONAL...")
         else:
-            if "BNC" in t_web or "NACIONAL DE CREDITO" in t_web: precios_encontrados["BNC"] = p_clean
-            
-            elif "MERCANTIL" in t_web:
-                if "A" in t_web: precios_encontrados["MVZ.A"] = p_clean
-                if "B" in t_web: precios_encontrados["MVZ.B"] = p_clean # (Opcional si usas la B)
-            
-            elif "CANTV" in t_web: precios_encontrados["TDV.D"] = p_clean
-            
-            elif "SANTA TERESA" in t_web or "RST" in t_web: precios_encontrados["RST"] = p_clean
-            
-            # --- LOS QUE FALTABAN ---
-            elif "PROAGRO" in t_web or "PTN" in t_web or "PROTINAL" in t_web: precios_encontrados["PTN"] = p_clean
-            
-            elif "BOLSA DE VALORES" in t_web or "BVL" in t_web: precios_encontrados["BVL"] = p_clean
-            
-            elif "FONDO DE VALORES" in t_web or "FVI" in t_web:
-                if "B" in t_web: precios_encontrados["FVI.B"] = p_clean
-            
-            elif "INVACA" in t_web or "IVC" in t_web: precios_encontrados["IVC.A"] = p_clean
-            
-            elif "GIZLA" in t_web or "GZL" in t_web: precios_encontrados["GZL"] = p_clean
+            # Diccionario de respaldo por si el símbolo varía ligeramente
+            if "BNC" in t_web: precios_encontrados["BNC"] = p_clean
+            elif "MVZ.A" in t_web or ("MERCANTIL" in t_web and "A" in t_web): precios_encontrados["MVZ.A"] = p_clean
+            elif "TDV.D" in t_web or "CANTV" in t_web: precios_encontrados["TDV.D"] = p_clean
+            elif "RST" in t_web: precios_encontrados["RST"] = p_clean
+            elif "PTN" in t_web: precios_encontrados["PTN"] = p_clean
+            elif "BVL" in t_web: precios_encontrados["BVL"] = p_clean
+            elif "FVI.B" in t_web: precios_encontrados["FVI.B"] = p_clean
+            elif "IVC.A" in t_web: precios_encontrados["IVC.A"] = p_clean
 
 col_manual, col_auto = st.columns([3, 1])
 
 with col_auto:
-    st.write("") # Espacio
+    st.write("")
     st.write("")
     if st.button("🔄 Cargar de Sheets"):
         if precios_encontrados:
