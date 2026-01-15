@@ -21,7 +21,7 @@ st.markdown("""
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def cargar_datos():
-    """Carga los datos. Si no hay columna 'Tipo', la crea."""
+    """Carga el historial de operaciones."""
     try:
         df_port = conn.read(worksheet="Portafolio", ttl=0)
         df_port["Fecha Compra"] = pd.to_datetime(df_port["Fecha Compra"])
@@ -73,61 +73,64 @@ def obtener_tasa_bcv():
     except:
         return 0.0
 
-# --- NUEVA FUNCIÓN CORREGIDA: Busca la columna 'Símbolo' ---
-def cargar_precios_web_debug():
-    """Lee la hoja Precios_Web buscando columnas de Símbolo y Precio."""
+# --- FUNCIÓN INTELIGENTE DE PRECIOS ---
+def limpiar_precio_bvc(valor):
+    """
+    Arregla el problema de lectura de precios.
+    - Si Google manda un número (12.5), lo respeta.
+    - Si Google manda texto venezolano (1.200,50), lo convierte.
+    """
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    
+    texto = str(valor).strip()
+    if not texto: return 0.0
+    
     try:
-        # Leemos la hoja completa
+        # Intenta formato VE: Quita puntos de mil, cambia coma por punto
+        return float(texto.replace('.', '').replace(',', '.'))
+    except:
+        try:
+            # Intento formato estándar
+            return float(texto)
+        except:
+            return 0.0
+
+def cargar_precios_web_full():
+    """Lee TODOS los precios disponibles en la hoja."""
+    try:
         df_web = conn.read(worksheet="Precios_Web", ttl=0)
         
         if df_web.empty:
-            st.warning("⚠️ La hoja 'Precios_Web' parece estar vacía.")
             return pd.DataFrame()
 
-        # Limpieza de encabezados
         df_web.columns = df_web.columns.str.strip()
         
-        # --- CORRECCIÓN CLAVE: Buscar columna 'Símbolo' explícitamente ---
-        posibles_tickers = ["símbolo", "simbolo", "ticker", "código", "codigo"]
-        col_ticker = None
-        
-        # Primero intentamos buscar por nombre
-        for col in df_web.columns:
-            if any(t in col.lower() for t in posibles_tickers):
-                col_ticker = col
-                break
-        
-        # Si no la encuentra por nombre, probamos la Columna B (índice 1) que es donde está en tu foto
-        if not col_ticker and len(df_web.columns) > 1:
-            col_ticker = df_web.columns[1]
-        
-        # Si aun así falla, usamos la primera
-        if not col_ticker: 
-            col_ticker = df_web.columns[0]
+        # Buscar columna de Ticker
+        posibles_tickers = ["símbolo", "simbolo", "ticker", "código", "codigo", "especie"]
+        col_ticker = next((c for c in df_web.columns if any(t in c.lower() for t in posibles_tickers)), None)
+        if not col_ticker: col_ticker = df_web.columns[0] # Fallback a primera col
 
-        # Buscamos columna de Precio
-        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor"]
-        col_precio = None
-        for col in df_web.columns:
-            if any(p in col.lower() for p in posibles_precios):
-                col_precio = col
-                break
-        
-        # Fallback para precio (Columna C o indice 2 en tu foto)
-        if not col_precio and len(df_web.columns) > 2:
-            col_precio = df_web.columns[2]
-            
+        # Buscar columna de Precio
+        posibles_precios = ["último", "ultimo", "cierre", "precio", "valor", "cotización"]
+        col_precio = next((c for c in df_web.columns if any(p in c.lower() for p in posibles_precios)), None)
+        if not col_precio and len(df_web.columns) > 1: col_precio = df_web.columns[1] # Fallback a segunda col
+
         if col_ticker and col_precio:
-            return pd.DataFrame({
-                "Ticker": df_web[col_ticker].astype(str).str.strip().str.upper(),
-                "Precio Web Raw": df_web[col_precio]
-            })
+            # Creamos diccionario limpio
+            precios_dict = {}
+            for _, row in df_web.iterrows():
+                tick = str(row[col_ticker]).strip().upper()
+                precio_sucio = row[col_precio]
+                precios_dict[tick] = limpiar_precio_bvc(precio_sucio)
+            
+            return precios_dict
         else:
-            return pd.DataFrame()
+            return {}
             
     except Exception as e:
-        st.error(f"Error técnico leyendo hoja: {e}")
-        return pd.DataFrame()
+        st.error(f"Error leyendo hoja precios: {e}")
+        return {}
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("🇻🇪 Mi Portafolio de Inversiones")
@@ -135,122 +138,120 @@ st.markdown("---")
 
 # Tasa BCV
 tasa_bcv = obtener_tasa_bcv()
-tasa_uso = 0.0
+tasa_uso = tasa_bcv if tasa_bcv > 0 else st.number_input("⚠️ BCV Caído. Tasa Manual:", value=60.0)
 
-col_tasa, col_espacio = st.columns([1, 4])
-with col_tasa:
-    if tasa_bcv > 0:
-        st.metric("Tasa BCV Oficial", f"Bs. {tasa_bcv}", delta="En tiempo real", delta_color="normal")
-        tasa_uso = tasa_bcv
-    else:
-        tasa_uso = st.number_input("⚠️ BCV Caído. Ingresa Tasa Manual:", value=60.0)
+col_tasa, _ = st.columns([1, 4])
+if tasa_bcv > 0: col_tasa.metric("Tasa BCV", f"Bs. {tasa_bcv}", delta="En línea")
 
+# Cargar Datos
 df_portafolio = cargar_datos()
-acciones_base = ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL', 'CANTV', 'FVI.B']
+precios_web_dict = cargar_precios_web_full()
+
+# --- DEFINIR LISTA DE ACCIONES (DINÁMICA) ---
+# Unimos las que ya tienes compradas + las que aparecen en la hoja de precios
+mis_acciones = df_portafolio["Ticker"].unique().tolist() if not df_portafolio.empty else []
+acciones_en_web = list(precios_web_dict.keys())
+
+# Lista maestra para el dropdown (sin duplicados y ordenada)
+lista_acciones_completa = sorted(list(set(mis_acciones + acciones_en_web)))
+if not lista_acciones_completa:
+    lista_acciones_completa = ['BNC', 'MVZ.A', 'TDV.D', 'RST', 'PTN', 'BVL', 'CANTV', 'FVI.B'] # Backup
 
 # --- BARRA LATERAL ---
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Python.svg/1200px-Python.svg.png", width=50)
-    st.header("📝 Registrar Operación")
+    st.header("📝 Operaciones")
     
-    tipo_operacion = st.radio("¿Qué quieres hacer?", ["Compra", "Venta"], horizontal=True)
+    tipo_operacion = st.radio("Acción:", ["Compra", "Venta"], horizontal=True)
 
     with st.form("form_compra"):
         st.info(f"Tasa registro: Bs. {tasa_uso}")
-        ticker_in = st.selectbox("Acción", acciones_base)
+        
+        # AQUI ESTA EL CAMBIO: El dropdown ahora tiene TODAS las acciones de la hoja
+        ticker_in = st.selectbox("Acción", lista_acciones_completa)
         
         saldo_actual = 0
         if not df_portafolio.empty and ticker_in in df_portafolio["Ticker"].values:
             saldo_actual = df_portafolio[df_portafolio["Ticker"] == ticker_in]["Cantidad"].sum()
         
         if tipo_operacion == "Venta":
-            st.caption(f"⚠️ Tienes {saldo_actual} acciones disponibles.")
+            st.caption(f"⚠️ Tienes {saldo_actual} disponibles.")
         
         cant_in = st.number_input("Cantidad", min_value=1, value=100)
         costo_in = st.number_input(f"Precio {tipo_operacion} (Bs)", min_value=0.01, format="%.2f")
         fecha_in = st.date_input("Fecha", datetime.now())
         
-        submitted = st.form_submit_button(f"💾 Registrar {tipo_operacion}")
-        
-        if submitted:
+        if st.form_submit_button(f"💾 Registrar {tipo_operacion}"):
             if tipo_operacion == "Venta" and cant_in > saldo_actual:
-                st.error(f"❌ Error: No puedes vender {cant_in} acciones. Solo tienes {saldo_actual}.")
+                st.error(f"❌ No tienes suficientes acciones (Tienes {saldo_actual}).")
             else:
                 guardar_operacion(ticker_in, cant_in, costo_in, fecha_in, tasa_uso, tipo_operacion)
-                st.success(f"¡{tipo_operacion} registrada con éxito!")
+                st.success("¡Registrado!")
                 st.rerun()
 
 # --- SECCIÓN DE PRECIOS ---
+# Inicializar estado si está vacío
 if 'precios_mercado' not in st.session_state:
-    st.session_state.precios_mercado = pd.DataFrame({"Ticker": acciones_base, "Precio Bs.": [0.0]*len(acciones_base)})
+    # Por defecto iniciamos con MIS acciones, si no tengo, con todas
+    iniciar_con = mis_acciones if mis_acciones else lista_acciones_completa
+    st.session_state.precios_mercado = pd.DataFrame({"Ticker": iniciar_con, "Precio Bs.": [0.0]*len(iniciar_con)})
 
 st.subheader("📊 Precios de Hoy")
 
-# Cargar datos de la Hoja
-df_web = cargar_precios_web_debug()
-precios_encontrados = {}
-
-if not df_web.empty:
-    for index, row in df_web.iterrows():
-        t_web = str(row['Ticker'])
-        p_raw = str(row['Precio Web Raw'])
-        
-        try:
-            # Limpiamos el precio (1.000,00 -> 1000.00)
-            p_clean = float(p_raw.replace('.', '').replace(',', '.'))
-        except:
-            p_clean = 0.0
-            
-        # Como ahora leemos la columna SIMBOLO, la coincidencia debería ser exacta
-        # Pero mantenemos la búsqueda parcial por seguridad
-        if t_web in acciones_base:
-            precios_encontrados[t_web] = p_clean
-        else:
-            # Diccionario de respaldo por si el símbolo varía ligeramente
-            if "BNC" in t_web: precios_encontrados["BNC"] = p_clean
-            elif "MVZ.A" in t_web or ("MERCANTIL" in t_web and "A" in t_web): precios_encontrados["MVZ.A"] = p_clean
-            elif "TDV.D" in t_web or "CANTV" in t_web: precios_encontrados["TDV.D"] = p_clean
-            elif "RST" in t_web: precios_encontrados["RST"] = p_clean
-            elif "PTN" in t_web: precios_encontrados["PTN"] = p_clean
-            elif "BVL" in t_web: precios_encontrados["BVL"] = p_clean
-            elif "FVI.B" in t_web: precios_encontrados["FVI.B"] = p_clean
-            elif "IVC.A" in t_web: precios_encontrados["IVC.A"] = p_clean
-
-col_manual, col_auto = st.columns([3, 1])
-
+# Botón Cargar
+col_man, col_auto = st.columns([3, 1])
 with col_auto:
     st.write("")
     st.write("")
     if st.button("🔄 Cargar de Sheets"):
-        if precios_encontrados:
-            df_edit = st.session_state.precios_mercado.copy()
-            count = 0
-            for i, row in df_edit.iterrows():
-                tick = row['Ticker']
-                if tick in precios_encontrados and precios_encontrados[tick] > 0:
-                    df_edit.at[i, 'Precio Bs.'] = precios_encontrados[tick]
-                    count += 1
-            st.session_state.precios_mercado = df_edit
-            st.success(f"¡{count} precios actualizados!")
+        if precios_web_dict:
+            # Crear DataFrame con TODOS los precios encontrados
+            # Pero filtrar segun lo que el usuario quiera ver abajo
+            df_update = pd.DataFrame(list(precios_web_dict.items()), columns=["Ticker", "Precio Bs."])
+            st.session_state.precios_mercado = df_update
+            st.success(f"¡Precios actualizados ({len(df_update)} acciones)!")
             st.rerun()
         else:
-            st.warning("No se encontraron coincidencias. Revisa los nombres en tu Sheet.")
+            st.warning("Hoja vacía o sin datos reconocibles.")
 
-with col_manual:
-    with st.expander("📝 Editar precios manualmente", expanded=True):
-        st.session_state.precios_mercado = st.data_editor(
-            st.session_state.precios_mercado,
+# Tabla Editable
+with col_man:
+    # FILTRO: ¿Mostrar todo o solo lo mio?
+    mostrar_todas = st.checkbox("Ver todas las acciones disponibles (Web)", value=False)
+    
+    df_visual = st.session_state.precios_mercado.copy()
+    
+    # Si NO quiere ver todas, filtramos solo por las que tiene en portafolio
+    if not mostrar_todas and mis_acciones:
+        df_visual = df_visual[df_visual["Ticker"].isin(mis_acciones)]
+    
+    with st.expander("📝 Tabla de Precios (Editable)", expanded=True):
+        df_editado = st.data_editor(
+            df_visual,
             column_config={"Precio Bs.": st.column_config.NumberColumn(format="%.2f Bs")},
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
+            key="editor_precios"
         )
+        # Actualizamos el estado global solo con las filas que se editaron
+        # (Esto es un truco para mantener sincronizado el filtro)
+        if not df_editado.equals(df_visual):
+             # Actualizar en el maestro solo las que cambiaron
+             for i, row in df_editado.iterrows():
+                 idx_master = st.session_state.precios_mercado.index[st.session_state.precios_mercado["Ticker"] == row["Ticker"]]
+                 if not idx_master.empty:
+                     st.session_state.precios_mercado.at[idx_master[0], "Precio Bs."] = row["Precio Bs."]
+
 
 # --- CÁLCULOS Y KPIs ---
 if not df_portafolio.empty:
-    
+    # Usamos el DF maestro de precios para los cálculos (no el filtrado visual)
     df_final = df_portafolio.merge(st.session_state.precios_mercado, on="Ticker", how="left")
     
     df_final["Inv. Total (Bs)"] = df_final["Total Invertido (Bs)"]
+    # Si no hay precio actual, asume 0
+    df_final["Precio Bs."] = df_final["Precio Bs."].fillna(0)
+    
     df_final["Valor Hoy (Bs)"] = df_final["Cantidad"] * df_final["Precio Bs."]
     df_final["Ganancia (Bs)"] = df_final["Valor Hoy (Bs)"] - df_final["Inv. Total (Bs)"]
     
@@ -262,21 +263,20 @@ if not df_portafolio.empty:
         lambda x: (x["Ganancia ($)"] / x["Inv. Total ($)"] * 100) if x["Inv. Total ($)"] != 0 else 0, axis=1
     )
 
-    # --- KPIs DOBLE MONEDA ---
+    # --- KPIs ---
     st.markdown("### 💰 Estado de Cuenta")
     
-    total_bs = df_final["Valor Hoy (Bs)"].sum()
     total_usd = df_final["Valor Hoy ($)"].sum()
-    
-    inv_total_bs = df_final["Inv. Total (Bs)"].sum()
+    ganancia_usd = df_final["Ganancia ($)"].sum()
     inv_total_usd = df_final["Inv. Total ($)"].sum()
     
+    total_bs = df_final["Valor Hoy (Bs)"].sum()
     ganancia_bs = df_final["Ganancia (Bs)"].sum()
-    ganancia_usd = df_final["Ganancia ($)"].sum()
+    inv_total_bs = df_final["Inv. Total (Bs)"].sum()
     
     rent_total = ((total_usd - inv_total_usd) / inv_total_usd * 100) if inv_total_usd != 0 else 0
     
-    # Fila DÓLARES
+    # DÓLARES
     st.markdown("##### 💵 Referencia en Divisas")
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Valor Cartera ($)", f"${total_usd:,.2f}")
@@ -284,7 +284,7 @@ if not df_portafolio.empty:
     k3.metric("Total Invertido ($)", f"${inv_total_usd:,.2f}")
     k4.metric("Rentabilidad Global", f"{rent_total:.2f}%")
 
-    # Fila BOLÍVARES
+    # BOLÍVARES
     st.markdown("##### 🇻🇪 Referencia en Bolívares")
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("Valor Cartera (Bs)", f"Bs. {total_bs:,.2f}")
@@ -295,27 +295,28 @@ if not df_portafolio.empty:
     # --- GRÁFICOS ---
     tab1, tab2 = st.tabs(["📈 Distribución & Valor", "📋 Detalle Tabla"])
     
-    df_agrupado = df_final.groupby("Ticker")[["Valor Hoy ($)", "Ganancia ($)"]].sum().reset_index()
-    df_agrupado = df_agrupado[df_agrupado["Valor Hoy ($)"] > 0] 
+    # Filtramos para gráficos (solo positivos para pie chart)
+    df_pos = df_final.groupby("Ticker")[["Valor Hoy ($)", "Ganancia ($)"]].sum().reset_index()
+    df_pos = df_pos[df_pos["Valor Hoy ($)"] > 0.01] 
 
     with tab1:
         c1, c2 = st.columns(2)
         with c1:
-            fig_pie = px.pie(df_agrupado, values='Valor Hoy ($)', names='Ticker', hole=0.4, title="¿Dónde está mi dinero?")
-            st.plotly_chart(fig_pie, use_container_width=True)
+            if not df_pos.empty:
+                fig_pie = px.pie(df_pos, values='Valor Hoy ($)', names='Ticker', hole=0.4, title="¿Dónde está mi dinero?")
+                st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.info("No tienes valor positivo actual.")
         with c2:
             fig_bar = px.bar(df_final, x='Ticker', y='Ganancia ($)', color='Ganancia ($)', 
-                             title="Histórico de Operaciones ($)", color_continuous_scale="RdBu")
+                             title="Rendimiento por Acción ($)", color_continuous_scale="RdBu")
             st.plotly_chart(fig_bar, use_container_width=True)
 
     with tab2:
-        cols_mostrar = ["Tipo", "Ticker", "Cantidad", "Fecha Compra", "Precio Operacion (Bs)", "Total Invertido ($)", "Ganancia ($)", "Rentabilidad %"]
-        df_mostrar = df_final.rename(columns={"Precio Compra (Bs)": "Precio Operacion (Bs)"})
-        cols_finales = [c for c in cols_mostrar if c in df_mostrar.columns]
-        
-        st.dataframe(df_mostrar[cols_finales].style.format({
+        cols = ["Tipo", "Ticker", "Cantidad", "Fecha Compra", "Precio Operacion (Bs)", "Valor Hoy ($)", "Ganancia ($)", "Rentabilidad %"]
+        st.dataframe(df_final[cols].style.format({
             "Precio Operacion (Bs)": "{:.2f}",
-            "Total Invertido ($)": "${:.2f}",
+            "Valor Hoy ($)": "${:.2f}",
             "Ganancia ($)": "${:.2f}",
             "Rentabilidad %": "{:.2f}%"
         }), use_container_width=True)
@@ -323,21 +324,16 @@ if not df_portafolio.empty:
     # --- REPORTES ---
     st.markdown("---")
     st.subheader("📅 Reportes Históricos")
-    periodo = st.selectbox("Filtrar operaciones:", ["Todo el Historial", "Última Semana", "Último Mes", "Último Año"])
+    periodo = st.selectbox("Periodo:", ["Todo", "7 días", "30 días", "365 días"])
     
-    hoy = datetime.now()
-    if periodo == "Última Semana": fecha_corte = hoy - timedelta(days=7)
-    elif periodo == "Último Mes": fecha_corte = hoy - timedelta(days=30)
-    elif periodo == "Último Año": fecha_corte = hoy - timedelta(days=365)
-    else: fecha_corte = datetime(2000, 1, 1)
-        
-    df_reporte = df_final[df_final["Fecha Compra"] >= pd.to_datetime(fecha_corte)]
+    dias = {"Todo": 9999, "7 días": 7, "30 días": 30, "365 días": 365}
+    fecha_corte = datetime.now() - timedelta(days=dias[periodo])
     
-    if not df_reporte.empty:
-        st.info(f"Mostrando: {periodo}")
-        st.dataframe(df_reporte)
+    df_rep = df_final[df_final["Fecha Compra"] >= fecha_corte]
+    if not df_rep.empty:
+        st.dataframe(df_rep)
     else:
-        st.warning(f"No hay movimientos para {periodo}.")
+        st.caption("No hay datos en este periodo.")
 
 else:
     st.info("👈 Registra tu primera compra para empezar.")
