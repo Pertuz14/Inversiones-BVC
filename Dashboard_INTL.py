@@ -61,14 +61,25 @@ def buscar_tasa_en_bitacora(fecha_buscada):
     except: pass
     return None
 
-# --- FUNCIONES DE DATOS (CON CORRECCIÓN DE ERRORES) ---
+# --- FUNCIONES DE DATOS BLINDADAS ---
 def cargar_datos():
     try:
+        # 1. Leemos la hoja
         df = conn.read(worksheet="Portafolio_INTL", ttl=0)
-        df["Fecha"] = pd.to_datetime(df["Fecha"])
+        
+        # 2. LIMPIEZA CRÍTICA: Eliminar filas que estén completamente vacías
+        df = df.dropna(how='all')
+        
+        # 3. Conversión de Fecha (Con corrección de errores)
+        if "Fecha" in df.columns:
+            # 'coerce' transforma fechas inválidas en NaT (Not a Time) en lugar de dar error
+            df["Fecha"] = pd.to_datetime(df["Fecha"], errors='coerce')
+            # Eliminamos filas donde la fecha no se pudo leer (basura)
+            df = df.dropna(subset=["Fecha"])
+            
         return df
-    except:
-        # Si falla, devolvemos estructura vacía para que no se rompa
+    except Exception as e:
+        # Si falla, devolvemos DataFrame vacío pero con las columnas correctas
         return pd.DataFrame(columns=["Ticker", "Cantidad", "Precio", "Fecha", "Tipo", "Tasa"])
 
 def guardar_operacion(ticker, cantidad, precio, fecha, tipo, tasa_historica):
@@ -86,41 +97,28 @@ def guardar_operacion(ticker, cantidad, precio, fecha, tipo, tasa_historica):
             "Tasa": tasa_historica
         }])
         
-        # Concatenación robusta
         if df_actual.empty:
             df_updated = nuevo
         else:
-            # Aseguramos que df_actual tenga la columna Tasa para evitar errores
+            # Asegurar columna Tasa
             if "Tasa" not in df_actual.columns:
                 df_actual["Tasa"] = 0.0
+            
+            # Concatenar
             df_updated = pd.concat([df_actual, nuevo], ignore_index=True)
         
-        # Formato de fecha estricto para Google Sheets
+        # 4. FORMATEO SEGURO DE FECHA (Para evitar errores al guardar)
+        # Aseguramos que TODO sea datetime antes de convertir a string
+        df_updated["Fecha"] = pd.to_datetime(df_updated["Fecha"])
         df_updated["Fecha"] = df_updated["Fecha"].dt.strftime('%Y-%m-%d')
         
-        # INTENTO DE GUARDADO
+        # Guardado
         conn.update(worksheet="Portafolio_INTL", data=df_updated)
-        st.cache_data.clear() # Limpiar memoria para ver cambios
+        st.cache_data.clear()
         return True, "Éxito"
         
     except Exception as e:
         return False, str(e)
-
-def obtener_precios_actuales(lista_tickers):
-    if not lista_tickers: return {}
-    try:
-        datos = yf.download(lista_tickers, period="1d", progress=False)['Close']
-        precios = {}
-        if len(lista_tickers) == 1:
-            val = datos.iloc[-1]
-            precios[lista_tickers[0]] = float(val)
-        else:
-            current = datos.iloc[-1]
-            for tick in lista_tickers:
-                if tick in current: precios[tick] = float(current[tick])
-        return precios
-    except:
-        return {}
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("🌎 Mi Portafolio Internacional")
