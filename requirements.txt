@@ -5,3 +5,4 @@ requests
 beautifulsoup4
 lxml
 st-gsheets-connection
+yfinance
