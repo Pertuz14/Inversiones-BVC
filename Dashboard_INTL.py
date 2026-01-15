@@ -82,6 +82,26 @@ def cargar_datos():
         # Si falla, devolvemos DataFrame vacío pero con las columnas correctas
         return pd.DataFrame(columns=["Ticker", "Cantidad", "Precio", "Fecha", "Tipo", "Tasa"])
 
+def obtener_precios_actuales(lista_tickers):
+    if not lista_tickers: return {}
+    try:
+        # Descargamos precios de hoy
+        datos = yf.download(lista_tickers, period="1d", progress=False)['Close']
+        precios = {}
+        
+        # Si es una sola acción
+        if len(lista_tickers) == 1:
+            val = datos.iloc[-1]
+            precios[lista_tickers[0]] = float(val)
+        else:
+            # Si son varias
+            current = datos.iloc[-1]
+            for tick in lista_tickers:
+                if tick in current: precios[tick] = float(current[tick])
+        return precios
+    except:
+        return {}
+
 def guardar_operacion(ticker, cantidad, precio, fecha, tipo, tasa_historica):
     try:
         df_actual = cargar_datos()
